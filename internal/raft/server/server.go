@@ -24,6 +24,15 @@ type Server struct {
 	// such as stale leaders. It starts from 0 and increases by 1 over time, as per Section 5.1 from the
 	// [Raft paper](https://raft.github.io/raft.pdf)
 	CurrentTerm int
+	// A Log is a collection of LogEntry objects. If State is Leader, this collection is Append Only as per the Leader
+	// Append-Only Property in Figure 3 from the [Raft paper](https://raft.github.io/raft.pdf)
+	Log []LogEntry
+	// TODO: THis is property for each follower, maybe this should be a different type
+	// nextIndex is the index of the next LogEntry the leader will send to a follower
+	nextIndex int
+	// StateMachine is the state machine of the Server as per Section 2 from the
+	// [Raft paper](https://raft.github.io/raft.pdf)
+	StateMachine StateMachine
 }
 
 func NewServer() *Server {
