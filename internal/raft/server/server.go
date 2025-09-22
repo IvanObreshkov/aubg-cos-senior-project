@@ -55,16 +55,37 @@ type Server struct {
 	// [Raft paper](https://raft.github.io/raft.pdf)
 	StateMachine StateMachine
 	// Transport is the transport layer used for sending RPC messages
-	Transport *transport.Transport
+	transport *transport.Transport
 	// A list of NetworkAddresses of the Servers in the cluster
 	peers []raft.ServerAddress
+	// The underlying gRPC server
+	grpcServer *grpc.Server
 }
 
 // RequestVote handles the RequestVote RPC call from a peer's client
-func (s *Server) RequestVote(context.Context, *transport.RequestVoteRequest) (*transport.RequestVoteResponse, error) {
+func (s *Server) RequestVote(ctx context.Context, req *transport.RequestVoteRequest) (*transport.RequestVoteResponse, error) {
+	fmt.Print("HANDLING REQ")
+	fmt.Print("CTX\n", ctx)
+	fmt.Print("REQ\n", req)
 	return nil, nil
 }
 
+// BeginElection is called when a server does not receive HeartBeat messages from a Leader node over an ElectionTimeout
+// period, as per Section 5.2 from the [Raft paper](https://raft.github.io/raft.pdf)
+func (s *Server) BeginElection() error {
+	req := &transport.RequestVoteRequest{
+		Term:         0,
+		CandidateId:  "test",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	}
+	fmt.Print("SENDING REQ\n")
+	resp, _ := s.transport.RequestVote(context.Background(), "localhost:50052", req)
+	fmt.Printf("TEST RESP, %v\n", resp)
+	return nil
+}
+
+// StartServer starts a new Raft node on the given port
 func (s *Server) StartServer(port int) error {
 	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 	if err != nil {
@@ -82,10 +103,26 @@ func (s *Server) StartServer(port int) error {
 	grpcServer := grpc.NewServer(grpc.ConnectionTimeout(time.Second * 30))
 	transport.RegisterRaftServiceServer(grpcServer, s)
 
-	log.Printf("Raft node with ID %s running on %s:%d with peers %v\n", s.ID, tcpAddr.IP, tcpAddr.Port, s.peers)
+	s.grpcServer = grpcServer
 
+	log.Printf("Raft node with ID %s running on %s:%d with peers %v\n", s.ID, tcpAddr.IP, tcpAddr.Port, s.peers)
+	// TODO: Add election timeout which will unblock the thread the server is running in and begin election
 	return grpcServer.Serve(lis)
 
+}
+
+func (s *Server) GracefulShutdown() {
+	log.Printf("Shutting down server %s gracefully", s.ID)
+	// First, stop accepting new incoming requests, in order to prevent interrupting a pending response to a peer
+	s.grpcServer.GracefulStop()
+	// Then, close all outbound client connections
+	s.transport.CloseAllClients()
+}
+
+func (s *Server) ForceShutdown() {
+	log.Printf("Force shutting down server %s", s.ID)
+	s.transport.CloseAllClients()
+	s.grpcServer.Stop()
 }
 
 func NewServer(currentTerm uint64, peers []raft.ServerAddress) *Server {
@@ -101,7 +138,7 @@ func NewServer(currentTerm uint64, peers []raft.ServerAddress) *Server {
 			CurrentTerm: term,
 		},
 		ID:        raft.ServerID(uuid.New().String()),
-		Transport: transport.NewTransport(peers),
+		transport: transport.NewTransport(peers),
 		peers:     peers,
 	}
 }
