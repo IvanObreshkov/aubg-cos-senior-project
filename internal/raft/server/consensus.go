@@ -29,3 +29,6 @@ RPCs when they believe a current leader exists. Specifically, if a server receiv
 the minimum election timeout of hearing from a current leader, it does not update its term or grant its vote
 
 */
+
+type ConsensusModule struct {
+}

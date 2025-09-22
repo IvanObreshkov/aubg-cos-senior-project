@@ -45,13 +45,5 @@ Check Section 8 for more info.
 
 */
 
-type StateMachineCommand string
-
-type LogEntry struct {
-	// An Index identifying the position of the LogEntry in the Log
-	Index int
-	// A Command for the Server's StateMachine
-	Command StateMachineCommand
-	// The Term number when the entry was received by the Leader. This is used to detect inconsistencies between logs
-	Term int
+type LogStorage interface {
 }
