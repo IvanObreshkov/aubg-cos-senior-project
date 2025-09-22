@@ -1,7 +1,5 @@
 package server
 
-import "context"
-
 /*
 These are notes from Section 5.2
 Begin an Election:
@@ -33,8 +31,4 @@ the minimum election timeout of hearing from a current leader, it does not updat
 */
 
 type ConsensusModule struct {
-}
-
-func (c *ConsensusModule) BeginElection(ctx context.Context) {
-	
 }
