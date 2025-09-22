@@ -40,7 +40,7 @@ type serverState struct {
 }
 
 type Server struct {
-	// This makes the Server struct impl the RaftServiceServer interface
+	// This makes the Server struct impl the transport.RaftServiceServer interface
 	transport.UnimplementedRaftServiceServer
 
 	serverState
@@ -100,11 +100,8 @@ func NewServer(currentTerm uint64, peers []raft.ServerAddress) *Server {
 			State:       Follower,
 			CurrentTerm: term,
 		},
-		ID:           raft.ServerID(uuid.New().String()),
-		Address:      "",
-		Log:          nil,
-		StateMachine: nil,
-		Transport:    transport.NewTransport(peers),
-		peers:        peers,
+		ID:        raft.ServerID(uuid.New().String()),
+		Transport: transport.NewTransport(peers),
+		peers:     peers,
 	}
 }
