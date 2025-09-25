@@ -1,7 +1,6 @@
 package main
 
 import (
-	"aubg-cos-senior-project/internal/raft"
 	"aubg-cos-senior-project/internal/raft/server"
 	"context"
 	"fmt"
@@ -33,22 +32,22 @@ func main() {
 	<-done
 }
 
-func reserveAddresses(clusterSize int, basePort int) []raft.ServerAddress {
-	var allPeers []raft.ServerAddress
+func reserveAddresses(clusterSize int, basePort int) []server.ServerAddress {
+	var allPeers []server.ServerAddress
 
 	for i := 0; i < clusterSize; i++ {
 		addr := fmt.Sprintf("localhost:%d", basePort+i)
-		allPeers = append(allPeers, raft.ServerAddress(addr))
+		allPeers = append(allPeers, server.ServerAddress(addr))
 	}
 
 	return allPeers
 }
 
-func createCluster(clusterSize int, reservedAddresses []raft.ServerAddress) []*server.Server {
+func createCluster(clusterSize int, reservedAddresses []server.ServerAddress) []*server.Server {
 	servers := make([]*server.Server, clusterSize)
 
 	for i := 0; i < clusterSize; i++ {
-		var peers []raft.ServerAddress
+		var peers []server.ServerAddress
 		for j, addr := range reservedAddresses {
 			// Create peers list (all servers except current one)
 			if j != i {
@@ -64,7 +63,8 @@ func createCluster(clusterSize int, reservedAddresses []raft.ServerAddress) []*s
 
 func bootCluster(servers []*server.Server, basePort int) {
 	for i, raftServer := range servers {
-		// Start each server in a separate goroutine
+		// Start each server in a separate goroutine, as each one makes a blocking call to wait for new incoming TCP
+		// connections, which will block the main goroutine itself
 		go func(i int, s *server.Server) {
 			port := basePort + i
 			if err := s.StartServer(port); err != nil {

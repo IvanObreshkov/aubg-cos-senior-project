@@ -1,4 +1,4 @@
-package server
+package raft
 
 /*
 These are notes from Section 5.2
