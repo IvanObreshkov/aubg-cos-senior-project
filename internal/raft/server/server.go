@@ -10,7 +10,6 @@ import (
 	"math/rand"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,6 +31,7 @@ func getElectionTimeoutMs() time.Duration {
 // [Raft paper](https://raft.github.io/raft.pdf)
 // It provides an interface to set/get the variables in a thread safe manner.
 type serverState struct {
+	// Protects all fields below
 	mu sync.RWMutex
 
 	// The state of the server as per Section 5.1 from the [Raft paper](https://raft.github.io/raft.pdf). When a server
@@ -41,8 +41,9 @@ type serverState struct {
 	// by servers to detect obsolete info, such as stale leaders. It is initialized to 0 on first boot of the cluster,
 	// and  increases monotonically, as per Section 5.1 from the [Raft paper](https://raft.github.io/raft.pdf)
 	currentTerm uint64
-	// The ID of the candidate server that the current server has voted for in the CurrentTerm.
-	votedFor ServerID
+	// The ID of the Candidate Server that the current Server has voted for in the currentTerm. It could be null at the
+	// beginning of a new term, as no votes are issued.
+	votedFor *ServerID
 	// TODO: THis is property for each follower, maybe this should be a different type
 	// nextIndex is the index of the next LogEntry the leader will send to a follower
 	//nextIndex uint64
@@ -55,36 +56,48 @@ type serverState struct {
 }
 
 func (s *serverState) getState() State {
-	return State(atomic.LoadUint64((*uint64)(&s.state)))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state
 }
 
 func (s *serverState) setState(state State) {
-	atomic.StoreUint64((*uint64)(&s.state), uint64(state))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state = state
 }
 
 func (s *serverState) getCurrentTerm() uint64 {
-	return atomic.LoadUint64(&s.currentTerm)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.currentTerm
 }
 
 func (s *serverState) setCurrentTerm(term uint64) {
-	atomic.StoreUint64(&s.currentTerm, term)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.currentTerm = term
 }
 
 func (s *serverState) getElectionTimeout() time.Duration {
-	return time.Duration(atomic.LoadInt64((*int64)(&s.electionTimeout)))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.electionTimeout
 }
 
 func (s *serverState) setElectionTimeout(timeout time.Duration) {
-	atomic.StoreInt64((*int64)(&s.electionTimeout), int64(timeout))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.electionTimeout = timeout
 }
 
-func (s *serverState) getVotedFor() ServerID {
+func (s *serverState) getVotedFor() *ServerID {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.votedFor
 }
 
-func (s *serverState) setVotedFor(id ServerID) {
+func (s *serverState) setVotedFor(id *ServerID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.votedFor = id
@@ -128,8 +141,46 @@ func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest)
 
 // AppendEntries handles the AppendEntries RPC call from a peer's client
 func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequest) (*proto.AppendEntriesResponse, error) {
-	s.electionTimeoutTimer.Reset(s.electionTimeout)
-	return nil, nil
+	// Get the currentTerm of the server handling the request
+	currTerm := s.getCurrentTerm()
+
+	// If a server receives a request with a stale term number, it rejects the request. (Section 5.1)
+	if req.Term < currTerm {
+		return &proto.AppendEntriesResponse{
+			Term:    currTerm,
+			Success: false,
+		}, nil
+	}
+
+	// if one server’s current term is smaller than the other’s (Section 5.1)
+	if req.Term > currTerm {
+		// 1. then it updates its current term to the larger value
+		s.setCurrentTerm(req.Term)
+		// 2. If a candidate or leader discovers that its term is out of date, it immediately reverts to follower state
+		s.setState(Follower)
+		// Clear vote for new term. This is an explicit rule from Figure 2 for RequestVote and is required by the
+		// Election Safety Property. Since we are now in a new, higher term, we must reset the vote to 'null' to be
+		// eligible to vote for a candidate in this new term. (RequestVote logic) An old 'votedFor' value is only valid
+		// for the old 'currentTerm'.
+		s.setVotedFor(nil)
+	}
+
+	// Reset election timeout since we received communication from a leader
+	s.electionTimeoutTimer.Reset(s.getElectionTimeout())
+
+	// For heartbeat (empty entries), return success with the current term
+	if len(req.Entries) == 0 {
+		return &proto.AppendEntriesResponse{
+			Term:    s.getCurrentTerm(),
+			Success: true,
+		}, nil
+	}
+
+	// #TDDO: Handle actual log entries here...
+	return &proto.AppendEntriesResponse{
+		Term:    s.getCurrentTerm(),
+		Success: false,
+	}, nil
 }
 
 // BeginElection is called when a server does not receive HeartBeat messages from a Leader node over an ElectionTimeout
