@@ -1,6 +1,7 @@
 package main
 
 import (
+	"aubg-cos-senior-project/internal"
 	"aubg-cos-senior-project/internal/raft/server"
 	"context"
 	"fmt"
@@ -45,6 +46,7 @@ func reserveAddresses(clusterSize int, basePort int) []server.ServerAddress {
 
 func createCluster(clusterSize int, reservedAddresses []server.ServerAddress) []*server.Server {
 	servers := make([]*server.Server, clusterSize)
+	pubSub := internal.NewPubSub()
 
 	for i := 0; i < clusterSize; i++ {
 		var peers []server.ServerAddress
@@ -55,7 +57,8 @@ func createCluster(clusterSize int, reservedAddresses []server.ServerAddress) []
 			}
 		}
 
-		servers[i] = server.NewServer(0, peers)
+		manager := server.NewStateManager(pubSub)
+		servers[i] = server.NewServer(0, peers, manager)
 	}
 
 	return servers

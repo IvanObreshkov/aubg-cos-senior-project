@@ -1,5 +1,7 @@
 package server
 
+import "aubg-cos-senior-project/internal"
+
 // ServerID is the id of the server in the cluster
 type ServerID string
 
@@ -15,3 +17,18 @@ const (
 	Follower
 	Candidate
 )
+
+const (
+	// ServerShutDown event is sent when the server is shutting down. The payload for this event is an empty struct.
+	ServerShutDown internal.EventType = iota
+	// ElectionTimeoutExpired is sent when the ElectionTimeout of the server has expired.
+	ElectionTimeoutExpired
+	// HeartBeatReceived is sent when the server receives a HeartBeat. This re
+	HeartBeatReceived
+)
+
+type ServerCtx struct {
+	ID    ServerID
+	Addr  ServerAddress
+	State State
+}

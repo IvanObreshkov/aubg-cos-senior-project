@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 )
 
-// EventType is the type of event subscribers are listening for
+// EventType is the type of event subscribers are listening for. This is a base type.
 type EventType int
 
 // SubscriptionOptions configures the behavior of a subscription.
@@ -17,8 +17,8 @@ type SubscriptionOptions struct {
 	IsBlocking bool
 }
 
-// SubscriberChan defines the channel through which subscribers receive Event.Payload
-type SubscriberChan chan any
+// SubscriberChan defines the channel through which subscribers receive Events.
+type SubscriberChan chan *Event
 
 // SubscriberID is a unique identifier for a single subscription instance.
 // It is returned upon subscribing and is required to unsubscribe.
@@ -40,6 +40,13 @@ type Event struct {
 	Payload any
 }
 
+func NewEvent(eventType EventType, payload any) *Event {
+	return &Event{
+		Type:    eventType,
+		Payload: payload,
+	}
+}
+
 // PubSub implements the publish-subscribe pattern and is designed to be thread-safe. It could be used for various
 // event based flows across the project.
 type PubSub struct {
@@ -58,7 +65,7 @@ type PubSub struct {
 	// The buffer solves this by acting as a queue, allowing Publish() to return immediately.
 	//
 	// It also allows in-flight events to be drained during a GracefulShutdown.
-	publishChan chan Event
+	publishChan chan *Event
 
 	// shuttingDown is used to atomically track if a shutdown process has begun.
 	shuttingDown atomic.Bool
@@ -117,7 +124,7 @@ func (p *PubSub) Unsubscribe(eventType EventType, id SubscriberID) {
 }
 
 // Publish sends an event to the PubSub system for broadcast.
-func (p *PubSub) Publish(event Event) {
+func (p *PubSub) Publish(event *Event) {
 	// The RLock here prevents a critical race condition.
 	// THE RACE: Without a lock, a shutdown could occur between the check and the send:
 	// 1. Goroutine A calls Publish() and sees `p.shuttingDown` is false.
@@ -205,14 +212,14 @@ func (p *PubSub) run() {
 			for id, sub := range subscribers {
 				// Check the subscriber's policy on how to handle a full channel.
 				if sub.Options.IsBlocking {
-					// Perform a blocking send. This guarantees delivery but can stall the broker
-					// if the subscriber is slow to read from its channel.
-					sub.Chan <- event.Payload
+					// Perform a blocking send. This guarantees delivery but will stall the broker if the subscriber is
+					// slow to read from its channel.
+					sub.Chan <- event
 				} else {
 					// Perform a non-blocking send.
 					select {
-					case sub.Chan <- event.Payload:
-						// Success
+					case sub.Chan <- event:
+						// Success, assuming the Sub has defined itself as non-blocking and its buffered chan has space.
 					default:
 						// For non-blocking subscribers, drop the message if their channel is full.
 						// This protects the PubSub system from being stalled by a single slow subscriber.
@@ -231,7 +238,7 @@ func (p *PubSub) run() {
 func NewPubSub() *PubSub {
 	p := &PubSub{
 		registry:    make(map[EventType]map[SubscriberID]*Subscriber),
-		publishChan: make(chan Event, 100),
+		publishChan: make(chan *Event, 100),
 	}
 	p.shuttingDown.Store(false)
 
