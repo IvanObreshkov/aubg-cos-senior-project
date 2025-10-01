@@ -4,10 +4,11 @@ import (
 	"aubg-cos-senior-project/internal/raft/proto"
 	"context"
 	"fmt"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"log"
 	"sync"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type Transport struct {
@@ -62,17 +63,25 @@ func (t *Transport) AppendEntries(ctx context.Context, peerAddress ServerAddress
 }
 
 func (t *Transport) HeartbeatRPC(ctx context.Context, peerAddress ServerAddress) (*proto.AppendEntriesResponse, error) {
+	// This is passed from the server which is sending the request
 	currTerm, ok := GetServerCurrTerm(ctx)
 	if !ok {
 		panic(fmt.Sprintf("required currTerm not found in ctx: %v", currTerm))
 	}
 
+	leaderID, ok := GetServerID(ctx)
+	if !ok {
+		panic("required leaderID not found in ctx")
+	}
+
 	// TODO: Retrieve server info from the ctx
 	hbReq := &proto.AppendEntriesRequest{
-		Term:         currTerm,
-		LeaderId:     "",
+		Term:     currTerm,
+		LeaderId: string(leaderID),
+		// TODO: Get these from actual log state
 		PrevLogIndex: 0,
 		PrevLogTerm:  0,
+		// This in empty for heartbeats as per Section 5.2
 		Entries:      nil,
 		LeaderCommit: 0,
 	}
