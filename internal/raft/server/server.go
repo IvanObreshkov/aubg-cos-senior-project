@@ -9,7 +9,6 @@ import (
 	"log"
 	"math/rand"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,82 +26,6 @@ func getElectionTimeoutMs() time.Duration {
 	return time.Duration(rand.Intn(151)+150) * time.Millisecond
 }
 
-// serverState is container for different state variables as defined in Figure 2 from the
-// [Raft paper](https://raft.github.io/raft.pdf)
-// It provides an interface to set/get the variables in a thread safe manner.
-type serverState struct {
-	// Protects all fields below
-	mu sync.RWMutex
-
-	// The state of the server as per Section 5.1 from the [Raft paper](https://raft.github.io/raft.pdf). When a server
-	// initially starts it is a Follower as per Section 5.2 from the paper.
-	state State
-	// The latest term server has seen. It is a [logical clock](https://dl.acm.org/doi/pdf/10.1145/359545.359563) used
-	// by servers to detect obsolete info, such as stale leaders. It is initialized to 0 on first boot of the cluster,
-	// and  increases monotonically, as per Section 5.1 from the [Raft paper](https://raft.github.io/raft.pdf)
-	currentTerm uint64
-	// The ID of the Candidate Server that the current Server has voted for in the currentTerm. It could be null at the
-	// beginning of a new term, as no votes are issued.
-	votedFor *ServerID
-	// TODO: THis is property for each follower, maybe this should be a different type
-	// nextIndex is the index of the next LogEntry the leader will send to a follower
-	//nextIndex uint64
-
-	// ElectionTimeout is the current election timeout for the server. It is randomly chosen when the server is created.
-	// It should be used with a time.Timer, and the timer should be reset at the beginning of each new election and
-	// when the server receives an AppendEntries RPC, as per Section 5.2 from the
-	// [Raft paper](https://raft.github.io/raft.pdf). It only makes sense when Server is Follower or Candidate.
-	electionTimeout time.Duration
-}
-
-func (s *serverState) getState() State {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.state
-}
-
-func (s *serverState) setState(state State) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.state = state
-}
-
-func (s *serverState) getCurrentTerm() uint64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.currentTerm
-}
-
-func (s *serverState) setCurrentTerm(term uint64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.currentTerm = term
-}
-
-func (s *serverState) getElectionTimeout() time.Duration {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.electionTimeout
-}
-
-func (s *serverState) setElectionTimeout(timeout time.Duration) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.electionTimeout = timeout
-}
-
-func (s *serverState) getVotedFor() *ServerID {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.votedFor
-}
-
-func (s *serverState) setVotedFor(id *ServerID) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.votedFor = id
-}
-
 type Server struct {
 	// This makes the Server struct impl the proto.RaftServiceServer interface
 	proto.UnimplementedRaftServiceServer
@@ -112,7 +35,7 @@ type Server struct {
 	ID ServerID
 	// The network address of the server
 	Address ServerAddress
-	// A Log is a collection of LogEntry objects. If State is Leader, this collection is Append Only as per the Leader
+	// A Log is a collection of proto.LogEntry objects. If State is Leader, this collection is Append Only as per the Leader
 	// Append-Only Property in Figure 3 from the [Raft paper](https://raft.github.io/raft.pdf)
 	Log raft.LogStorage
 	// StateMachine is the state machine of the Server as per Section 2 from the
@@ -127,8 +50,8 @@ type Server struct {
 	// The timer for the serverState.electionTimeout as defined in Section 5.2 from the
 	// [Raft paper](https://raft.github.io/raft.pdf)
 	electionTimeoutTimer *time.Timer
-	// stateManager is the orchestrator of the server
-	stateManager *StateManager
+	// pubSub is used to send events about the state of the server to subscribed listeners
+	pubSub *internal.PubSub
 }
 
 // RequestVote handles the RequestVote RPC call from a peer's client
@@ -141,19 +64,16 @@ func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest)
 
 // AppendEntries handles the AppendEntries RPC call from a peer's client
 func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequest) (*proto.AppendEntriesResponse, error) {
-	// Get the currentTerm of the server handling the request
-	currTerm := s.getCurrentTerm()
-
 	// If a server receives a request with a stale term number, it rejects the request. (Section 5.1)
-	if req.Term < currTerm {
+	if req.Term < s.getCurrentTerm() {
 		return &proto.AppendEntriesResponse{
-			Term:    currTerm,
+			Term:    s.getCurrentTerm(),
 			Success: false,
 		}, nil
 	}
 
 	// if one server’s current term is smaller than the other’s (Section 5.1)
-	if req.Term > currTerm {
+	if req.Term > s.getCurrentTerm() {
 		// 1. then it updates its current term to the larger value
 		s.setCurrentTerm(req.Term)
 		// 2. If a candidate or leader discovers that its term is out of date, it immediately reverts to follower state
@@ -176,7 +96,7 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 		}, nil
 	}
 
-	// #TDDO: Handle actual log entries here...
+	// TODO: Handle actual log entries here...
 	return &proto.AppendEntriesResponse{
 		Term:    s.getCurrentTerm(),
 		Success: false,
@@ -185,17 +105,56 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 
 // BeginElection is called when a server does not receive HeartBeat messages from a Leader node over an ElectionTimeout
 // period, as per Section 5.2 from the [Raft paper](https://raft.github.io/raft.pdf)
-func (s *Server) BeginElection() error {
+func (s *Server) BeginElection() {
+	// Start on a clean state
+	s.setGrantedVotesTotal(0)
+
+	// 1. Increment the currentTerm of the Server
+	s.incrementCurrentTerm()
+
+	// 2. Transition to a Candidate state
+	s.setState(Candidate)
+
+	// 3. The server Votes for itself
+	s.setVotedFor(&s.ID)
+
+	// 4. Send a RequestVote RPC to all its peers in the cluster
 	req := &proto.RequestVoteRequest{
-		Term:         s.currentTerm,
-		CandidateId:  "test",
+		Term:         s.getCurrentTerm(),
+		CandidateId:  string(s.ID),
 		LastLogIndex: 0,
 		LastLogTerm:  0,
 	}
-	fmt.Print("SENDING REQ\n")
-	resp, _ := s.transport.RequestVote(context.Background(), "localhost:50052", req)
-	fmt.Printf("TEST RESP, %v\n", resp)
-	return nil
+	log.Printf("Server %v Initiated a new Election", s.ID)
+
+	// TODO: Servers retry RPCs if they do not receive a response in a timely manner, and they issue RPCs in parallel
+	//  for best performance.
+	reqCtx := context.Background()
+	SetServerCurrTerm(reqCtx, s.getCurrentTerm())
+	SetServerID(reqCtx, s.ID)
+	SetServerAddr(reqCtx, s.Address)
+
+	resp, _ := s.transport.RequestVote(reqCtx, "localhost:50052", req)
+	// TODO: Handle err
+
+	// If one server’s current term is smaller than the other’s (Section 5.1)
+	if resp.Term > s.getCurrentTerm() {
+		s.setCurrentTerm(resp.Term)
+		s.setState(Follower)
+		s.setVotedFor(nil)
+		return
+	}
+
+	// Count the vote if granted
+	if resp.VoteGranted {
+		s.incrementGrantedVotesTotal()
+		// Signal Orchestrator that a vote was received
+		s.pubSub.Publish(internal.NewEvent(VoteReceived, struct{}{}))
+	}
+
+	// If we reach here, we didn't win the election. The ElectionTimeout will eventually expire and a new election
+	// will be triggered as per option c) from Section 5.2 in the Raft paper
+	log.Printf("Candidate %v neither won, nor lost the election", s.ID)
 }
 
 // StartServer starts a new Raft node on the given port
@@ -224,11 +183,11 @@ func (s *Server) StartServer(port int) error {
 
 	// Track ElectionTimeout on the background (while waiting for Heartbeats as per Section 5.2 from the
 	// [Raft paper](https://raft.github.io/raft.pdf))
-	go TrackElectionTimeoutJob(ServerCtx{
+	go TrackElectionTimeoutJob(serverCtx{
 		ID:    s.ID,
 		Addr:  s.Address,
 		State: s.getState(),
-	}, s.electionTimeoutTimer, s.stateManager.pubSub)
+	}, s.electionTimeoutTimer, s.pubSub)
 
 	// This one blocks as under the hood there is a call to lis.Accept which is a blocking operation.
 	return s.grpcServer.Serve(lis)
@@ -241,7 +200,7 @@ func (s *Server) GracefulShutdown() {
 	// Then, close all outbound client connections
 	s.transport.CloseAllClients()
 	// Send a signal to all listeners that the server is shutting down
-	s.stateManager.pubSub.Publish(internal.NewEvent(ServerShutDown, struct{}{}))
+	s.pubSub.Publish(internal.NewEvent(ServerShutDown, struct{}{}))
 }
 
 func (s *Server) ForceShutdown() {
@@ -249,10 +208,10 @@ func (s *Server) ForceShutdown() {
 	s.transport.CloseAllClients()
 	s.grpcServer.Stop()
 	// Send a signal to all listeners that the server is shutting down
-	s.stateManager.pubSub.Publish(internal.NewEvent(ServerShutDown, struct{}{}))
+	s.pubSub.Publish(internal.NewEvent(ServerShutDown, struct{}{}))
 }
 
-func NewServer(currentTerm uint64, peers []ServerAddress, manager *StateManager) *Server {
+func NewServer(currentTerm uint64, peers []ServerAddress, pubSub *internal.PubSub) *Server {
 	var term uint64 = 0
 	if currentTerm != 0 {
 		term = currentTerm
@@ -265,9 +224,9 @@ func NewServer(currentTerm uint64, peers []ServerAddress, manager *StateManager)
 			currentTerm:     term,
 			electionTimeout: getElectionTimeoutMs(),
 		},
-		ID:           ServerID(uuid.New().String()),
-		transport:    NewTransport(peers),
-		peers:        peers,
-		stateManager: manager,
+		ID:        ServerID(uuid.New().String()),
+		transport: NewTransport(peers),
+		peers:     peers,
+		pubSub:    pubSub,
 	}
 }

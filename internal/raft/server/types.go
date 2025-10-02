@@ -23,11 +23,11 @@ const (
 	ServerShutDown internal.EventType = iota
 	// ElectionTimeoutExpired is sent when the ElectionTimeout of the server has expired.
 	ElectionTimeoutExpired
-	// HeartBeatReceived is sent when the server receives a HeartBeat. This re
-	HeartBeatReceived
+	// VoteReceived is sent when a server in a Candidate state receives a vote
+	VoteReceived
 )
 
-type ServerCtx struct {
+type serverCtx struct {
 	ID    ServerID
 	Addr  ServerAddress
 	State State

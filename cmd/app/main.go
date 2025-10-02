@@ -44,8 +44,8 @@ func reserveAddresses(clusterSize int, basePort int) []server.ServerAddress {
 	return allPeers
 }
 
-func createCluster(clusterSize int, reservedAddresses []server.ServerAddress) map[*server.Server]*server.StateManager {
-	serverManagerMap := make(map[*server.Server]*server.StateManager)
+func createCluster(clusterSize int, reservedAddresses []server.ServerAddress) map[*server.Server]*server.Orchestrator {
+	serverToOrchestratorMap := make(map[*server.Server]*server.Orchestrator)
 	pubSub := internal.NewPubSub()
 
 	for i := 0; i < clusterSize; i++ {
@@ -58,16 +58,16 @@ func createCluster(clusterSize int, reservedAddresses []server.ServerAddress) ma
 		}
 
 		srv := server.NewServer(0, peers, pubSub)
-		mgr := server.NewStateManager(pubSub, srv)
-		serverManagerMap[srv] = mgr
+		orch := server.NewOrchestrator(pubSub, srv)
+		serverToOrchestratorMap[srv] = orch
 	}
 
-	return serverManagerMap
+	return serverToOrchestratorMap
 }
 
-func bootCluster(serverManagerMap map[*server.Server]*server.StateManager, basePort int) {
+func bootCluster(serverToOrchestratorMap map[*server.Server]*server.Orchestrator, basePort int) {
 	i := 0
-	for srv, mgr := range serverManagerMap {
+	for srv, orch := range serverToOrchestratorMap {
 		// Start each server in a separate goroutine
 		go func(i int, s *server.Server) {
 			port := basePort + i
@@ -77,18 +77,18 @@ func bootCluster(serverManagerMap map[*server.Server]*server.StateManager, baseP
 		}(i, srv)
 
 		// Start each state manager in a separate goroutine
-		go mgr.Run()
+		go orch.Run()
 
 		i++
 		// Small delay between server starts to prevent race conditions
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	log.Printf("Started %d servers and state managers in the Raft cluster", len(serverManagerMap))
+	log.Printf("Started %d servers and state managers in the Raft cluster", len(serverToOrchestratorMap))
 	log.Println("Press Ctrl+C to stop all servers")
 }
 
-func listenForShutdown(serverManagerMap map[*server.Server]*server.StateManager, done chan bool) {
+func listenForShutdown(serverToOrchestratorMap map[*server.Server]*server.Orchestrator, done chan bool) {
 	// Create context that listens for the interrupt signal from the OS.
 	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -105,11 +105,11 @@ func listenForShutdown(serverManagerMap map[*server.Server]*server.StateManager,
 	defer cancel()
 
 	var servers []*server.Server
-	for srv := range serverManagerMap {
+	for srv := range serverToOrchestratorMap {
 		servers = append(servers, srv)
 	}
 
-	gracefulShutdownDone := gracefullyShutdownCluster(serverManagerMap)
+	gracefulShutdownDone := gracefullyShutdownCluster(serverToOrchestratorMap)
 
 	// Race the shutdown completion against the timeout
 	select {
@@ -132,12 +132,12 @@ func listenForShutdown(serverManagerMap map[*server.Server]*server.StateManager,
 	done <- true
 }
 
-func gracefullyShutdownCluster(serverManagerMap map[*server.Server]*server.StateManager) chan struct{} {
+func gracefullyShutdownCluster(serverToOrchestratorMap map[*server.Server]*server.Orchestrator) chan struct{} {
 	// Create a WaitGroup to wait for all servers to shut down
 	var gracefulShutdownWget sync.WaitGroup
 
 	// Gracefully Shutdown all servers in a concurrent manner
-	for raftServer := range serverManagerMap {
+	for raftServer := range serverToOrchestratorMap {
 		gracefulShutdownWget.Add(1)
 		go func(s *server.Server) {
 			defer gracefulShutdownWget.Done()
