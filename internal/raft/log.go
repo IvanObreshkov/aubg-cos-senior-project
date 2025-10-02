@@ -1,4 +1,4 @@
-package server
+package raft
 
 /*
 Notes from Section 5.3
@@ -44,6 +44,5 @@ and the state machine is responsible for tracking these UIDs and associated resp
 Check Section 8 for more info.
 
 */
-
 type LogStorage interface {
 }

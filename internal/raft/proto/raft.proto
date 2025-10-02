@@ -1,11 +1,11 @@
 syntax = "proto3";
 
-package raft;
+package proto;
 
 // The go_package option in Protocol Buffers specifies the Go import path for the generated Go code from this protobuf
 // file.
 // https://stackoverflow.com/questions/66321215/what-is-the-go-package-option-used-for-in-a-protocol-buffer-file
-option go_package = "aubg-cos-senior-project/internal/raft/transport";
+option go_package = "aubg-cos-senior-project/internal/raft/proto";
 
 
 // RequestVote RPC arguments as per Figure 2 in the [Raft paper](https://raft.github.io/raft.pdf)

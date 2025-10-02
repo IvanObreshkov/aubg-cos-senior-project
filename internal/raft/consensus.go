@@ -1,4 +1,4 @@
-package server
+package raft
 
 /*
 These are notes from Section 5.2
@@ -30,5 +30,6 @@ the minimum election timeout of hearing from a current leader, it does not updat
 
 */
 
+// ConsensusModule on a server receives commands from clients and adds them to its log
 type ConsensusModule struct {
 }

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"aubg-cos-senior-project/internal/raft"
+	"aubg-cos-senior-project/internal"
 	"aubg-cos-senior-project/internal/raft/server"
 	"context"
 	"fmt"
@@ -18,37 +18,38 @@ func main() {
 
 	// TODO: Maybe impl service discovery, to make port binding dynamic
 	reservedAddresses := reserveAddresses(clusterSize, basePort)
-	servers := createCluster(clusterSize, reservedAddresses)
+	serverManagerMap := createCluster(clusterSize, reservedAddresses)
 
 	// Create a done channel to signal when the shutdown is complete
 	done := make(chan bool, 1)
 
 	// Start graceful shutdown monitoring before bootCluster blocks
-	go listenForShutdown(servers, done)
+	go listenForShutdown(serverManagerMap, done)
 
 	// This will block indefinitely until shutdown is triggered
-	bootCluster(servers, basePort)
+	bootCluster(serverManagerMap, basePort)
 
 	// Wait for the graceful shutdown to complete
 	<-done
 }
 
-func reserveAddresses(clusterSize int, basePort int) []raft.ServerAddress {
-	var allPeers []raft.ServerAddress
+func reserveAddresses(clusterSize int, basePort int) []server.ServerAddress {
+	var allPeers []server.ServerAddress
 
 	for i := 0; i < clusterSize; i++ {
 		addr := fmt.Sprintf("localhost:%d", basePort+i)
-		allPeers = append(allPeers, raft.ServerAddress(addr))
+		allPeers = append(allPeers, server.ServerAddress(addr))
 	}
 
 	return allPeers
 }
 
-func createCluster(clusterSize int, reservedAddresses []raft.ServerAddress) []*server.Server {
-	servers := make([]*server.Server, clusterSize)
+func createCluster(clusterSize int, reservedAddresses []server.ServerAddress) map[*server.Server]*server.Orchestrator {
+	serverToOrchestratorMap := make(map[*server.Server]*server.Orchestrator)
+	pubSub := internal.NewPubSub()
 
 	for i := 0; i < clusterSize; i++ {
-		var peers []raft.ServerAddress
+		var peers []server.ServerAddress
 		for j, addr := range reservedAddresses {
 			// Create peers list (all servers except current one)
 			if j != i {
@@ -56,31 +57,38 @@ func createCluster(clusterSize int, reservedAddresses []raft.ServerAddress) []*s
 			}
 		}
 
-		servers[i] = server.NewServer(0, peers)
+		srv := server.NewServer(0, peers, pubSub)
+		orch := server.NewOrchestrator(pubSub, srv)
+		serverToOrchestratorMap[srv] = orch
 	}
 
-	return servers
+	return serverToOrchestratorMap
 }
 
-func bootCluster(servers []*server.Server, basePort int) {
-	for i, raftServer := range servers {
+func bootCluster(serverToOrchestratorMap map[*server.Server]*server.Orchestrator, basePort int) {
+	i := 0
+	for srv, orch := range serverToOrchestratorMap {
 		// Start each server in a separate goroutine
 		go func(i int, s *server.Server) {
 			port := basePort + i
 			if err := s.StartServer(port); err != nil {
 				log.Printf("Server %v failed to boot due to err: %v", s.ID, err)
 			}
-		}(i, raftServer)
+		}(i, srv)
 
+		// Start each state manager in a separate goroutine
+		go orch.Run()
+
+		i++
 		// Small delay between server starts to prevent race conditions
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	log.Printf("Started %d servers in the Raft cluster", len(servers))
+	log.Printf("Started %d servers and state managers in the Raft cluster", len(serverToOrchestratorMap))
 	log.Println("Press Ctrl+C to stop all servers")
 }
 
-func listenForShutdown(servers []*server.Server, done chan bool) {
+func listenForShutdown(serverToOrchestratorMap map[*server.Server]*server.Orchestrator, done chan bool) {
 	// Create context that listens for the interrupt signal from the OS.
 	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -96,7 +104,12 @@ func listenForShutdown(servers []*server.Server, done chan bool) {
 	forceShutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	gracefulShutdownDone := gracefullyShutdownCluster(servers)
+	var servers []*server.Server
+	for srv := range serverToOrchestratorMap {
+		servers = append(servers, srv)
+	}
+
+	gracefulShutdownDone := gracefullyShutdownCluster(serverToOrchestratorMap)
 
 	// Race the shutdown completion against the timeout
 	select {
@@ -119,12 +132,12 @@ func listenForShutdown(servers []*server.Server, done chan bool) {
 	done <- true
 }
 
-func gracefullyShutdownCluster(servers []*server.Server) chan struct{} {
+func gracefullyShutdownCluster(serverToOrchestratorMap map[*server.Server]*server.Orchestrator) chan struct{} {
 	// Create a WaitGroup to wait for all servers to shut down
 	var gracefulShutdownWget sync.WaitGroup
 
 	// Gracefully Shutdown all servers in a concurrent manner
-	for _, raftServer := range servers {
+	for raftServer := range serverToOrchestratorMap {
 		gracefulShutdownWget.Add(1)
 		go func(s *server.Server) {
 			defer gracefulShutdownWget.Done()
