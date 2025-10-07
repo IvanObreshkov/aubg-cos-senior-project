@@ -17,34 +17,54 @@ type SubscriptionOptions struct {
 	IsBlocking bool
 }
 
-// SubscriberChan defines the channel through which subscribers receive Events.
-type SubscriberChan chan *Event
-
 // SubscriberID is a unique identifier for a single subscription instance.
 // It is returned upon subscribing and is required to unsubscribe.
 type SubscriberID uint64
 
-// Subscriber holds the channel and configuration for a single subscriber.
-type Subscriber struct {
-	Chan       SubscriberChan
-	Options    SubscriptionOptions
-	NumDropped uint64 // For monitoring, atomically updated.
-}
-
 // nextSubscriberID is used to provide a unique ID for each subscriber.
 var nextSubscriberID uint64
 
-// Event is the message structure that is published via PubSub.
-type Event struct {
+// Event is a generic event with compile-time type safety for payloads.
+// Each instantiation creates a distinct concrete type (e.g., Event[string] != Event[int]).
+type Event[T any] struct {
 	Type    EventType
-	Payload any
+	Payload T
 }
 
-func NewEvent(eventType EventType, payload any) *Event {
-	return &Event{
+func NewEvent[T any](eventType EventType, payload T) *Event[T] {
+	return &Event[T]{
 		Type:    eventType,
 		Payload: payload,
 	}
+}
+
+// subscriber holds the channel and configuration for a single subscriber (internal, type-erased).
+//
+// TYPE ERASURE PATTERN:
+// The challenge: We need to store channels of different generic types (chan *Event[VoteGrantedPayload],
+// chan *Event[struct{}], chan *Event[time.Time], etc.) in a single homogeneous map registry.
+// Go doesn't allow heterogeneous types in the same map (each Event[T] instantiation is a distinct type).
+//
+// The solution: Instead of storing the typed channels directly, we store FUNCTIONS that know how to
+// operate on those channels. All functions have the same signature (homogeneous), but each captures
+// a different typed channel via closures. This is type erasure - we erase the specific type at the
+// storage level but preserve it in the closure's captured environment.
+//
+// Benefits:
+// - Single registry map for all subscriber types (efficient)
+// - Type safety at the API level (callers get Event[T])
+// - Type assertion happens once (at Subscribe time, not at every receive)
+type subscriber struct {
+	// sendFunc is a closure that captures a specific typed channel (chan *Event[T]).
+	// It performs type assertion from 'any' to T, constructs Event[T], and sends to the captured channel.
+	// Returns true if sent successfully, false if channel is full (non-blocking mode) or type mismatch.
+	sendFunc func(eventType EventType, payload any) bool
+
+	// closeFunc is a closure that captures the same typed channel and closes it when unsubscribing.
+	closeFunc func()
+
+	Options    SubscriptionOptions
+	NumDropped uint64 // For monitoring, atomically updated.
 }
 
 // PubSub implements the publish-subscribe pattern and is designed to be thread-safe. It could be used for various
@@ -54,8 +74,8 @@ type PubSub struct {
 	// Used to wait for the run() goroutine to finish
 	wg sync.WaitGroup
 
-	// registry maps an EventType to a list of Subscribers listing for it
-	registry map[EventType]map[SubscriberID]*Subscriber
+	// registry maps an EventType to a list of subscribers listening for it
+	registry map[EventType]map[SubscriberID]*subscriber
 
 	// publishChan is where all events of a given type are published, along with any payload for that event.
 	//
@@ -65,31 +85,78 @@ type PubSub struct {
 	// The buffer solves this by acting as a queue, allowing Publish() to return immediately.
 	//
 	// It also allows in-flight events to be drained during a GracefulShutdown.
-	publishChan chan *Event
+	publishChan chan struct {
+		eventType EventType
+		payload   any
+	}
 
 	// shuttingDown is used to atomically track if a shutdown process has begun.
 	shuttingDown atomic.Bool
 }
 
-// Subscribe registers a subscriber to listen for a specific EventType.
+// Subscribe registers a subscriber to listen for a specific EventType with compile-time type safety.
 // Following the IoC principle, the caller is responsible for creating and providing the channel.
 // This gives the caller full control over the channel's buffer size, tailoring it to their specific needs.
-// The returned SubscriberID is used to unsubscribe.
-func (p *PubSub) Subscribe(eventType EventType, channel SubscriberChan, opts SubscriptionOptions) SubscriberID {
+// Returns a SubscriberID for unsubscribing.
+//
+// TYPE ERASURE IMPLEMENTATION:
+// This function creates closures (sendFunc, closeFunc) that capture the typed channel 'ch'.
+// These closures are stored in the type-erased 'subscriber' struct, allowing us to store
+// channels of different types (Event[VoteGrantedPayload], Event[struct{}], etc.) in a single
+// homogeneous registry map. The type parameter T is "erased" at the storage level but preserved
+// in the closure's environment.
+func Subscribe[T any](p *PubSub, eventType EventType, ch chan *Event[T], opts SubscriptionOptions) SubscriberID {
 	// Only one goroutine at a time can register for a given EventType
 	// https://go.dev/blog/maps#concurrency
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	id := SubscriberID(atomic.AddUint64(&nextSubscriberID, 1))
-	sub := &Subscriber{
-		Chan:    channel, // Use the channel provided by the caller
+
+	// Create type-erased functions for the internal registry
+	sub := &subscriber{
 		Options: opts,
+		// TYPE ERASURE: This closure captures the typed channel 'ch' (chan *Event[T]).
+		// The closure signature is homogeneous (func(EventType, any) bool) allowing storage
+		// in a single map, but each instance captures a different typed channel.
+		sendFunc: func(evType EventType, payload any) bool {
+			// TYPE ASSERTION: Convert from type-erased 'any' back to the concrete type T.
+			// This happens once here, not in the caller's code - that's the key benefit!
+			typedPayload, ok := payload.(T)
+			if !ok {
+				log.Printf("[PubSub] Warning: Type mismatch for event %v. Expected %T, got %T",
+					evType, *new(T), payload)
+				return false
+			}
+
+			// Construct a strongly-typed Event[T] to send on the captured typed channel
+			event := &Event[T]{
+				Type:    evType,
+				Payload: typedPayload,
+			}
+
+			// Send to the captured channel (ch is closed over from the Subscribe call)
+			if opts.IsBlocking {
+				ch <- event
+				return true
+			} else {
+				select {
+				case ch <- event:
+					return true
+				default:
+					return false
+				}
+			}
+		},
+		// TYPE ERASURE: This closure also captures 'ch' and provides a uniform way to close it
+		closeFunc: func() {
+			close(ch)
+		},
 	}
 
 	// Initialize the inner map if this is the first registration for this EventType
 	if _, ok := p.registry[eventType]; !ok {
-		p.registry[eventType] = make(map[SubscriberID]*Subscriber)
+		p.registry[eventType] = make(map[SubscriberID]*subscriber)
 	}
 
 	// Register the subscriber
@@ -107,12 +174,12 @@ func (p *PubSub) Unsubscribe(eventType EventType, id SubscriberID) {
 	// Check if there are any subscribers for this event type
 	if subscribers, ok := p.registry[eventType]; ok {
 		// Check if the specific subscriber ID exists
-		if subscriber, ok := subscribers[id]; ok {
+		if sub, ok := subscribers[id]; ok {
 			// Remove the subscriber from the map
 			delete(subscribers, id)
 
 			// Close the channel to signal the subscriber goroutine to stop listening
-			close(subscriber.Chan)
+			sub.closeFunc()
 
 			// If no subscribers are left for this event type, delete the eventType
 			if len(subscribers) == 0 {
@@ -123,8 +190,8 @@ func (p *PubSub) Unsubscribe(eventType EventType, id SubscriberID) {
 	}
 }
 
-// Publish sends an event to the PubSub system for broadcast.
-func (p *PubSub) Publish(event *Event) {
+// Publish sends a generic event to the PubSub system for broadcast.
+func Publish[T any](p *PubSub, event *Event[T]) {
 	// The RLock here prevents a critical race condition.
 	// THE RACE: Without a lock, a shutdown could occur between the check and the send:
 	// 1. Goroutine A calls Publish() and sees `p.shuttingDown` is false.
@@ -137,6 +204,7 @@ func (p *PubSub) Publish(event *Event) {
 	// acquired while ANY RLock() is being held. Therefore, as long as this goroutine holds the RLock, we are
 	// guaranteed that the shutdown process is blocked and cannot close the channel under our feet
 	// See: https://en.wikipedia.org/wiki/Time-of-check_to_time-of-use
+
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -147,7 +215,13 @@ func (p *PubSub) Publish(event *Event) {
 	}
 
 	// This send is now safe. The channel cannot be closed while we hold the RLock.
-	p.publishChan <- event
+	p.publishChan <- struct {
+		eventType EventType
+		payload   any
+	}{
+		eventType: event.Type,
+		payload:   event.Payload,
+	}
 }
 
 // ForceShutdown immediately stops accepting new publishes and closes the channel.
@@ -200,33 +274,24 @@ func (p *PubSub) run() {
 	// Signal the WaitGroup when this function exits.
 	defer p.wg.Done()
 
-	for event := range p.publishChan {
+	for msg := range p.publishChan {
 		// Acquire read lock to safely read the registry while broadcasting
 		p.mu.RLock()
 
 		// Get the set of subscribers for this event type
-		if subscribers, ok := p.registry[event.Type]; ok {
-			log.Printf("[PubSub]: Broadcasting %v event to %d listeners.\n", event.Type, len(subscribers))
+		if subscribers, ok := p.registry[msg.eventType]; ok {
+			log.Printf("[PubSub]: Broadcasting %v event to %d listeners.\n", msg.eventType, len(subscribers))
 
-			// FAN-OUT: Iterate over all registered channels for this specific type.
+			// FAN-OUT: Iterate over all type-erased subscribers.
+			// Each subscriber's sendFunc closure knows how to convert the type-erased payload
+			// back to its specific type T and send Event[T] to its captured typed channel.
 			for id, sub := range subscribers {
-				// Check the subscriber's policy on how to handle a full channel.
-				if sub.Options.IsBlocking {
-					// Perform a blocking send. This guarantees delivery but will stall the broker if the subscriber is
-					// slow to read from its channel.
-					sub.Chan <- event
-				} else {
-					// Perform a non-blocking send.
-					select {
-					case sub.Chan <- event:
-						// Success, assuming the Sub has defined itself as non-blocking and its buffered chan has space.
-					default:
-						// For non-blocking subscribers, drop the message if their channel is full.
-						// This protects the PubSub system from being stalled by a single slow subscriber.
-						atomic.AddUint64(&sub.NumDropped, 1)
-						log.Printf("[PubSub] Dropped event %v for subscriber %d (channel blocked). Total dropped: %d\n",
-							event.Type, id, atomic.LoadUint64(&sub.NumDropped))
-					}
+				// Call the type-erased sendFunc - it handles type assertion and channel send internally
+				sent := sub.sendFunc(msg.eventType, msg.payload)
+				if !sent && !sub.Options.IsBlocking {
+					atomic.AddUint64(&sub.NumDropped, 1)
+					log.Printf("[PubSub] Dropped event %v for subscriber %d (channel blocked). Total dropped: %d\n",
+						msg.eventType, id, atomic.LoadUint64(&sub.NumDropped))
 				}
 			}
 		}
@@ -237,8 +302,11 @@ func (p *PubSub) run() {
 
 func NewPubSub() *PubSub {
 	p := &PubSub{
-		registry:    make(map[EventType]map[SubscriberID]*Subscriber),
-		publishChan: make(chan *Event, 100),
+		registry: make(map[EventType]map[SubscriberID]*subscriber),
+		publishChan: make(chan struct {
+			eventType EventType
+			payload   any
+		}, 100),
 	}
 	p.shuttingDown.Store(false)
 
