@@ -1,23 +1,19 @@
 package server
 
 import (
-	"aubg-cos-senior-project/internal"
+	"aubg-cos-senior-project/internal/pubsub"
+	"time"
 )
 
 // Orchestrator orchestrates and monitors the behavior of a Server, handling elections, state transitions, and
 // coordination between different server components.
 type Orchestrator struct {
-	// A channel where a signal is sent once the ElectionTimeout of a server expires. This channel is buffered.
-	electionTimeoutExpiredChan chan *internal.Event
-	// A channel where a shutdown signal is received. It could be used to notify all background threads that they need
-	// to finish work. It also signals that the Orchestrator running in a goroutine should exit. This channel is
-	// buffered.
-	shutDownChan chan *internal.Event
-	// A channel where a signal is sent when a new vote is received, assuming the server is in Candidate state
-	voteReceivedChan chan *internal.Event
+	electionTimeoutExpiredChan <-chan *pubsub.Event[time.Time]
+	shutDownChan               <-chan *pubsub.Event[struct{}]
+	voteReceivedChan           <-chan *pubsub.Event[VoteGrantedPayload]
+	electionWonChan            <-chan *pubsub.Event[uint64]
 
-	pubSub *internal.PubSub
-	// The server that is orchestrated.
+	pubSub *pubsub.PubSubClient
 	server *Server
 }
 
@@ -26,30 +22,41 @@ func (s *Orchestrator) Run() {
 	for {
 		select {
 		case <-s.electionTimeoutExpiredChan:
-			// Only start an election if we are a Follower or Candidate.
-			// This prevents a Leader from mistakenly starting an election.
-			if s.server.getState() == Follower || s.server.getState() == Candidate {
-				s.server.BeginElection()
-			}
+			s.server.BeginElection()
+
+		case ev := <-s.voteReceivedChan:
+			s.server.OnVoteGranted(ev.Payload.From, ev.Payload.Term)
+
+		case ev := <-s.electionWonChan:
+			s.server.OnElectionWon(ev.Payload)
+
 		case <-s.shutDownChan:
 			return
 		}
-
 	}
 }
 
-func NewOrchestrator(pubSub *internal.PubSub, server *Server) *Orchestrator {
-	manager := &Orchestrator{
-		electionTimeoutExpiredChan: make(chan *internal.Event, 1),
-		shutDownChan:               make(chan *internal.Event, 1),
-		voteReceivedChan:           make(chan *internal.Event, len(server.peers)+1),
-		pubSub:                     pubSub,
-		server:                     server,
+func NewOrchestrator(pubSub *pubsub.PubSubClient, server *Server) *Orchestrator {
+	orchestrator := &Orchestrator{
+		pubSub: pubSub,
+		server: server,
 	}
 
-	pubSub.Subscribe(ServerShutDown, manager.shutDownChan, internal.SubscriptionOptions{IsBlocking: false})
-	pubSub.Subscribe(ElectionTimeoutExpired, manager.electionTimeoutExpiredChan, internal.SubscriptionOptions{IsBlocking: false})
-	pubSub.Subscribe(VoteReceived, manager.voteReceivedChan, internal.SubscriptionOptions{IsBlocking: false})
+	// Create channels and subscribe to events
+	shutDownChan := make(chan *pubsub.Event[struct{}], 1)
+	electionTimeoutExpiredChan := make(chan *pubsub.Event[time.Time], 1)
+	voteReceivedChan := make(chan *pubsub.Event[VoteGrantedPayload], len(server.peers)+1)
+	electionWonChan := make(chan *pubsub.Event[uint64], 1)
 
-	return manager
+	orchestrator.shutDownChan = shutDownChan
+	orchestrator.electionTimeoutExpiredChan = electionTimeoutExpiredChan
+	orchestrator.voteReceivedChan = voteReceivedChan
+	orchestrator.electionWonChan = electionWonChan
+
+	pubsub.Subscribe(pubSub, ServerShutDown, shutDownChan, pubsub.SubscriptionOptions{IsBlocking: false})
+	pubsub.Subscribe(pubSub, ElectionTimeoutExpired, electionTimeoutExpiredChan, pubsub.SubscriptionOptions{IsBlocking: false})
+	pubsub.Subscribe(pubSub, VoteGranted, voteReceivedChan, pubsub.SubscriptionOptions{IsBlocking: false})
+	pubsub.Subscribe(pubSub, ElectionWon, electionWonChan, pubsub.SubscriptionOptions{IsBlocking: false})
+
+	return orchestrator
 }

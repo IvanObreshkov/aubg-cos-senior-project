@@ -1,7 +1,7 @@
 package main
 
 import (
-	"aubg-cos-senior-project/internal"
+	"aubg-cos-senior-project/internal/pubsub"
 	"aubg-cos-senior-project/internal/raft/server"
 	"context"
 	"fmt"
@@ -16,18 +16,20 @@ func main() {
 	clusterSize := 2
 	basePort := 50051
 
-	// TODO: Maybe impl service discovery, to make port binding dynamic
-	reservedAddresses := reserveAddresses(clusterSize, basePort)
-	serverManagerMap := createCluster(clusterSize, reservedAddresses)
+	// Reserve addresses for the cluster
+	addrs := reserveAddresses(clusterSize, basePort)
+
+	// Create all servers and their orchestrators in the cluster
+	serverOrchestratorMap := createCluster(addrs)
 
 	// Create a done channel to signal when the shutdown is complete
 	done := make(chan bool, 1)
 
 	// Start graceful shutdown monitoring before bootCluster blocks
-	go listenForShutdown(serverManagerMap, done)
+	go listenForShutdown(serverOrchestratorMap, done)
 
 	// This will block indefinitely until shutdown is triggered
-	bootCluster(serverManagerMap, basePort)
+	bootCluster(serverOrchestratorMap, basePort)
 
 	// Wait for the graceful shutdown to complete
 	<-done
@@ -44,20 +46,29 @@ func reserveAddresses(clusterSize int, basePort int) []server.ServerAddress {
 	return allPeers
 }
 
-func createCluster(clusterSize int, reservedAddresses []server.ServerAddress) map[*server.Server]*server.Orchestrator {
+func createCluster(addrs []server.ServerAddress) map[*server.Server]*server.Orchestrator {
 	serverToOrchestratorMap := make(map[*server.Server]*server.Orchestrator)
-	pubSub := internal.NewPubSub()
+	pubSub := pubsub.NewPubSub()
 
-	for i := 0; i < clusterSize; i++ {
-		var peers []server.ServerAddress
-		for j, addr := range reservedAddresses {
-			// Create peers list (all servers except current one)
+	// First pass: create all servers so we can collect their IDs
+	var servers []*server.Server
+	for _, addr := range addrs {
+		srv := server.NewServer(0, addr, nil, pubSub)
+		servers = append(servers, srv)
+	}
+
+	// Second pass: update each server with peer IDs (all servers except itself)
+	for i, srv := range servers {
+		var peerIDs []server.ServerID
+		for j, otherSrv := range servers {
+			// Exclude current server
 			if j != i {
-				peers = append(peers, addr)
+				peerIDs = append(peerIDs, otherSrv.ID)
 			}
 		}
+		// Update the peers list for this server
+		srv.SetPeers(peerIDs)
 
-		srv := server.NewServer(0, peers, pubSub)
 		orch := server.NewOrchestrator(pubSub, srv)
 		serverToOrchestratorMap[srv] = orch
 	}
@@ -76,7 +87,7 @@ func bootCluster(serverToOrchestratorMap map[*server.Server]*server.Orchestrator
 			}
 		}(i, srv)
 
-		// Start each state manager in a separate goroutine
+		// Start each server orchestrator in a separate goroutine
 		go orch.Run()
 
 		i++
@@ -84,8 +95,8 @@ func bootCluster(serverToOrchestratorMap map[*server.Server]*server.Orchestrator
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	log.Printf("Started %d servers and state managers in the Raft cluster", len(serverToOrchestratorMap))
-	log.Println("Press Ctrl+C to stop all servers")
+	log.Printf("Started %d servers and their orchestrators in the Raft cluster", len(serverToOrchestratorMap))
+	log.Println("Press Ctrl+C to stop all servers and their orchestrators")
 }
 
 func listenForShutdown(serverToOrchestratorMap map[*server.Server]*server.Orchestrator, done chan bool) {

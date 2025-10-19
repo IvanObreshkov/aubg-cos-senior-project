@@ -1,6 +1,8 @@
 package server
 
-import "aubg-cos-senior-project/internal"
+import (
+	"aubg-cos-senior-project/internal/pubsub"
+)
 
 // ServerID is the id of the server in the cluster
 type ServerID string
@@ -20,15 +22,25 @@ const (
 
 const (
 	// ServerShutDown event is sent when the server is shutting down. The payload for this event is an empty struct.
-	ServerShutDown internal.EventType = iota
+	ServerShutDown pubsub.EventType = iota
 	// ElectionTimeoutExpired is sent when the ElectionTimeout of the server has expired.
 	ElectionTimeoutExpired
-	// VoteReceived is sent when a server in a Candidate state receives a vote
-	VoteReceived
+	// VoteGranted is sent when a server in a Candidate state receives a vote
+	VoteGranted
+	// ElectionWon is sent when a candidate has received enough votes to become leader
+	ElectionWon
 )
 
 type serverCtx struct {
 	ID    ServerID
 	Addr  ServerAddress
 	State State
+}
+
+// VoteGrantedPayload travels with VoteGranted events so the orchestrator can act on these.
+type VoteGrantedPayload struct {
+	// The Sever which granted us the vote
+	From ServerID
+	// The Term we received the vote for
+	Term uint64
 }
