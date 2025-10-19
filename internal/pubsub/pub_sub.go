@@ -1,4 +1,4 @@
-package pub_sub
+package pubsub
 
 import (
 	"log"
@@ -105,6 +105,13 @@ type PubSubClient struct {
 // channels of different types (Event[VoteGrantedPayload], Event[struct{}], etc.) in a single
 // homogeneous registry map. The type parameter T is "erased" at the storage level but preserved
 // in the closure's environment.
+//
+// Why a free function?
+// Go does not support methods that declare their own type parameters,
+// so `func (c *PubSubClient) Publish[T any](...)` is invalid.
+// Because PubSubClient itself isn’t generic, Publish must be a generic
+// top-level function that takes the client as its first parameter.
+// This mirrors patterns in the standard library (e.g., slices.Sort[T](s)).
 func Subscribe[T any](p *PubSubClient, eventType EventType, ch chan *Event[T], opts SubscriptionOptions) SubscriberID {
 	// Only one goroutine at a time can register for a given EventType
 	// https://go.dev/blog/maps#concurrency
@@ -135,14 +142,19 @@ func Subscribe[T any](p *PubSubClient, eventType EventType, ch chan *Event[T], o
 				Payload: typedPayload,
 			}
 
-			// Send to the captured channel (ch is closed over from the Subscribe call)
+			// Check the subscriber's policy on how to handle a full channel.
 			if opts.IsBlocking {
+				// Perform a blocking send. This guarantees delivery but will stall the broker if the subscriber is
+				// slow to read from its channel.
 				ch <- event
 				return true
 			} else {
 				select {
+				// Perform a non-blocking send.
 				case ch <- event:
 					return true
+				// For non-blocking subscribers, we will drop the message if their channel is full.
+				// This protects the PubSub system from being stalled by a single slow subscriber.
 				default:
 					return false
 				}
@@ -190,13 +202,14 @@ func (p *PubSubClient) Unsubscribe(eventType EventType, id SubscriberID) {
 	}
 }
 
-// Publish sends a generic event to the PubSubClient system for broadcast.
+// Publish broadcasts an event via the PubSubClient.
 //
-// WHY THIS IS A STANDALONE FUNCTION, NOT A METHOD:
-// Go does not support generic methods (methods with type parameters). The syntax
-// `func (p *PubSubClient) Publish[T any](...)` is not allowed in Go, even in Go 1.25+.
-// Therefore, this must be a standalone generic function with the PubSubClient instance as the first parameter.
-// This is the same pattern used throughout the Go standard library (e.g., slices.Sort[T](slice)).
+// Why a free function?
+// Go does not support methods that declare their own type parameters,
+// so `func (c *PubSubClient) Publish[T any](...)` is invalid.
+// Because PubSubClient itself isn’t generic, Publish must be a generic
+// top-level function that takes the client as its first parameter.
+// This mirrors patterns in the standard library (e.g., slices.Sort[T](s)).
 func Publish[T any](p *PubSubClient, event *Event[T]) {
 	// The RLock here prevents a critical race condition.
 	// THE RACE: Without a lock, a shutdown could occur between the check and the send:
