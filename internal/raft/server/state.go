@@ -7,20 +7,24 @@ import (
 
 // serverState is container for different state variables as defined in Figure 2 from the
 // [Raft paper](https://raft.github.io/raft.pdf)
-// It provides an interface to set/get the variables in a thread safe manner.
+// Thread Safety:
+//   - Provides atomic getter/setter methods for accessing individual fields
+//   - For operations requiring multiple field updates at the same time (transactionally), callers must
+//     acquire s.mu directly to maintain consistency across related state changes
 type serverState struct {
 	// Protects all fields below
 	mu sync.RWMutex
-
+	// TODO: (currentTerm and votedFor Updated on stable storage before responding to RPCs)
 	// The state of the server as per Section 5.1 from the [Raft paper](https://raft.github.io/raft.pdf). When a server
 	// initially starts it is a Follower as per Section 5.2 from the paper.
 	state State
 	// The latest term server has seen. It is a [logical clock](https://dl.acm.org/doi/pdf/10.1145/359545.359563) used
 	// by servers to detect obsolete info, such as stale leaders. It is initialized to 0 on first boot of the cluster,
-	// and  increases monotonically, as per Section 5.1 from the [Raft paper](https://raft.github.io/raft.pdf)
+	// and increases monotonically, as per Section 5.1 from the [Raft paper](https://raft.github.io/raft.pdf)
 	currentTerm uint64
 	// The ID of the Candidate Server that the current Server has voted for in the currentTerm. It could be null at the
-	// beginning of a new term, as no votes are issued.
+	// beginning of a new term, as no votes are issued. This should be set to null when the Term changes, as votes in
+	// Raft are per Term.
 	votedFor *ServerID
 	// TODO: THis is property for each follower, maybe this should be a different type
 	// nextIndex is the index of the next LogEntry the leader will send to a follower
@@ -31,9 +35,13 @@ type serverState struct {
 	// when the server receives an AppendEntries RPC, as per Section 5.2 from the
 	// [Raft paper](https://raft.github.io/raft.pdf). It only makes sense when Server is Follower or Candidate.
 	electionTimeout time.Duration
-	// grantedVotesTotal represents the total number of votes received during an Election, when the server is Candidate
-	// It should be reset at the beginning of each new Election.
-	grantedVotesTotal uint64
+	// votersThisTerm acts as a "set" for per-term vote dedupe.
+	// As defined in Section 5.2: "Each server will vote for at most one candidate in a given term, on a
+	// first-come-first-served basis."
+	// We still deduplicate on the Candidate side because the same voter can respond to multiple duplicated RequestVote
+	// requests for the same term (client retries, duplicate deliveries, slow/late responses, etc.)
+	// Count each voter at most once per term.
+	votersThisTerm map[ServerID]struct{}
 }
 
 func (s *serverState) getState() State {
@@ -89,20 +97,40 @@ func (s *serverState) setVotedFor(id *ServerID) {
 	defer s.mu.Unlock()
 	s.votedFor = id
 }
-func (s *serverState) getGrantedVotesTotal() uint64 {
+
+// recordVote adds a voter to the current term's voter set and returns true if this is a new vote.
+// Returns false if the voter has already voted this term (duplicate).
+func (s *serverState) recordVote(voterID ServerID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check if already voted
+	if _, exists := s.votersThisTerm[voterID]; exists {
+		return false // duplicate vote
+	}
+
+	// Record the vote
+	s.votersThisTerm[voterID] = struct{}{}
+	return true // new vote
+}
+
+// getVoteCount returns the number of votes received this term
+func (s *serverState) getVoteCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.grantedVotesTotal
+	return len(s.votersThisTerm)
 }
 
-func (s *serverState) setGrantedVotesTotal(votes uint64) {
+// initVotersForTerm initializes the voters map for a new election term
+func (s *serverState) initVotersForTerm(capacity int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.grantedVotesTotal = votes
+	s.votersThisTerm = make(map[ServerID]struct{}, capacity)
 }
 
-func (s *serverState) incrementGrantedVotesTotal() {
+// clearVoters clears the voters map
+func (s *serverState) clearVoters() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.grantedVotesTotal++
+	s.votersThisTerm = nil
 }
