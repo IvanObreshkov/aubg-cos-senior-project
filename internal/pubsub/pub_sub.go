@@ -1,4 +1,4 @@
-package internal
+package pub_sub
 
 import (
 	"log"
@@ -67,9 +67,9 @@ type subscriber struct {
 	NumDropped uint64 // For monitoring, atomically updated.
 }
 
-// PubSub implements the publish-subscribe pattern and is designed to be thread-safe. It could be used for various
+// PubSubClient implements the publish-subscribe pattern and is designed to be thread-safe. It could be used for various
 // event based flows across the project.
-type PubSub struct {
+type PubSubClient struct {
 	mu sync.RWMutex
 	// Used to wait for the run() goroutine to finish
 	wg sync.WaitGroup
@@ -105,7 +105,7 @@ type PubSub struct {
 // channels of different types (Event[VoteGrantedPayload], Event[struct{}], etc.) in a single
 // homogeneous registry map. The type parameter T is "erased" at the storage level but preserved
 // in the closure's environment.
-func Subscribe[T any](p *PubSub, eventType EventType, ch chan *Event[T], opts SubscriptionOptions) SubscriberID {
+func Subscribe[T any](p *PubSubClient, eventType EventType, ch chan *Event[T], opts SubscriptionOptions) SubscriberID {
 	// Only one goroutine at a time can register for a given EventType
 	// https://go.dev/blog/maps#concurrency
 	p.mu.Lock()
@@ -124,7 +124,7 @@ func Subscribe[T any](p *PubSub, eventType EventType, ch chan *Event[T], opts Su
 			// This happens once here, not in the caller's code - that's the key benefit!
 			typedPayload, ok := payload.(T)
 			if !ok {
-				log.Printf("[PubSub] Warning: Type mismatch for event %v. Expected %T, got %T",
+				log.Printf("[PubSubClient] Warning: Type mismatch for event %v. Expected %T, got %T",
 					evType, *new(T), payload)
 				return false
 			}
@@ -165,7 +165,7 @@ func Subscribe[T any](p *PubSub, eventType EventType, ch chan *Event[T], opts Su
 }
 
 // Unsubscribe removes a subscriber for a given event type.
-func (p *PubSub) Unsubscribe(eventType EventType, id SubscriberID) {
+func (p *PubSubClient) Unsubscribe(eventType EventType, id SubscriberID) {
 	// Only one goroutine at a time can unsubscribe for a given EventType
 	// https://go.dev/blog/maps#concurrency
 	p.mu.Lock()
@@ -185,13 +185,19 @@ func (p *PubSub) Unsubscribe(eventType EventType, id SubscriberID) {
 			if len(subscribers) == 0 {
 				delete(p.registry, eventType)
 			}
-			log.Printf("[PubSub] Unsubscribed subscriber %d from event type %v.", id, eventType)
+			log.Printf("[PubSubClient] Unsubscribed subscriber %d from event type %v.", id, eventType)
 		}
 	}
 }
 
-// Publish sends a generic event to the PubSub system for broadcast.
-func Publish[T any](p *PubSub, event *Event[T]) {
+// Publish sends a generic event to the PubSubClient system for broadcast.
+//
+// WHY THIS IS A STANDALONE FUNCTION, NOT A METHOD:
+// Go does not support generic methods (methods with type parameters). The syntax
+// `func (p *PubSubClient) Publish[T any](...)` is not allowed in Go, even in Go 1.25+.
+// Therefore, this must be a standalone generic function with the PubSubClient instance as the first parameter.
+// This is the same pattern used throughout the Go standard library (e.g., slices.Sort[T](slice)).
+func Publish[T any](p *PubSubClient, event *Event[T]) {
 	// The RLock here prevents a critical race condition.
 	// THE RACE: Without a lock, a shutdown could occur between the check and the send:
 	// 1. Goroutine A calls Publish() and sees `p.shuttingDown` is false.
@@ -208,9 +214,9 @@ func Publish[T any](p *PubSub, event *Event[T]) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	// If PubSub is shutting down, drop the message gracefully.
+	// If PubSubClient is shutting down, drop the message gracefully.
 	if p.shuttingDown.Load() {
-		log.Printf("[PubSub] Warning: Dropping published event %v because PubSub is shutting down.", event.Type)
+		log.Printf("[PubSubClient] Warning: Dropping published event %v because PubSubClient is shutting down.", event.Type)
 		return
 	}
 
@@ -226,7 +232,7 @@ func Publish[T any](p *PubSub, event *Event[T]) {
 
 // ForceShutdown immediately stops accepting new publishes and closes the channel.
 // It is non-blocking (it returns immediately).
-func (p *PubSub) ForceShutdown() {
+func (p *PubSubClient) ForceShutdown() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -236,7 +242,7 @@ func (p *PubSub) ForceShutdown() {
 	}
 
 	p.shuttingDown.Store(true)
-	log.Println("[PubSub] ForceStop: Closing publish channel immediately.")
+	log.Println("[PubSubClient] ForceStop: Closing publish channel immediately.")
 
 	// This triggers the run() loop to drain the buffer and terminate.
 	close(p.publishChan)
@@ -246,7 +252,7 @@ func (p *PubSub) ForceShutdown() {
 
 // GracefulShutdown ensures all buffered messages are processed and waits for the
 // run() goroutine to exit cleanly. It is blocking.
-func (p *PubSub) GracefulShutdown() {
+func (p *PubSubClient) GracefulShutdown() {
 	p.mu.Lock()
 	// Check if already shutting down to make the call idempotent.
 	if p.shuttingDown.Load() {
@@ -257,7 +263,7 @@ func (p *PubSub) GracefulShutdown() {
 
 	// 1. Set the flag to true to immediately reject new publishes.
 	p.shuttingDown.Store(true)
-	log.Println("[PubSub] GracefulStop: Rejected new publishes. Initiating buffer drain.")
+	log.Println("[PubSubClient] GracefulStop: Rejected new publishes. Initiating buffer drain.")
 
 	// 2. Close the channel. This signals the p.run() loop to start draining the buffer.
 	close(p.publishChan)
@@ -266,11 +272,11 @@ func (p *PubSub) GracefulShutdown() {
 	// 3. SYNCHRONIZATION: Wait for the run() goroutine to finish processing the buffer and exit.
 	p.wg.Wait()
 
-	log.Println("[PubSub] GracefulStop: Broker fully drained and terminated.")
+	log.Println("[PubSubClient] GracefulStop: Broker fully drained and terminated.")
 }
 
 // run is the central goroutine that performs the broadcasting logic.
-func (p *PubSub) run() {
+func (p *PubSubClient) run() {
 	// Signal the WaitGroup when this function exits.
 	defer p.wg.Done()
 
@@ -280,17 +286,15 @@ func (p *PubSub) run() {
 
 		// Get the set of subscribers for this event type
 		if subscribers, ok := p.registry[msg.eventType]; ok {
-			log.Printf("[PubSub]: Broadcasting %v event to %d listeners.\n", msg.eventType, len(subscribers))
+			log.Printf("[PubSubClient]: Broadcasting %v event to %d listeners.\n", msg.eventType, len(subscribers))
 
 			// FAN-OUT: Iterate over all type-erased subscribers.
 			// Each subscriber's sendFunc closure knows how to convert the type-erased payload
-			// back to its specific type T and send Event[T] to its captured typed channel.
 			for id, sub := range subscribers {
-				// Call the type-erased sendFunc - it handles type assertion and channel send internally
 				sent := sub.sendFunc(msg.eventType, msg.payload)
 				if !sent && !sub.Options.IsBlocking {
 					atomic.AddUint64(&sub.NumDropped, 1)
-					log.Printf("[PubSub] Dropped event %v for subscriber %d (channel blocked). Total dropped: %d\n",
+					log.Printf("[PubSubClient] Dropped event %v for subscriber %d (channel blocked). Total dropped: %d\n",
 						msg.eventType, id, atomic.LoadUint64(&sub.NumDropped))
 				}
 			}
@@ -300,8 +304,8 @@ func (p *PubSub) run() {
 	}
 }
 
-func NewPubSub() *PubSub {
-	p := &PubSub{
+func NewPubSub() *PubSubClient {
+	p := &PubSubClient{
 		registry: make(map[EventType]map[SubscriberID]*subscriber),
 		publishChan: make(chan struct {
 			eventType EventType
