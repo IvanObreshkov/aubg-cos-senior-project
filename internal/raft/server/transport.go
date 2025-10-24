@@ -18,11 +18,28 @@ const (
 	// For typical networks, RPC round-trip times are << 15ms, so a 50-75ms timeout provides a comfortable safety margin.
 	RPCTimeout = 50 * time.Millisecond
 
-	// MaxRPCRetries is the number of times to retry a failed RPC
-	MaxRPCRetries = 3
+	// MaxRequestVoteRetries is the number of times to retry a failed RequestVote RPC
+	// RequestVote retries are bounded by the election timeout - if an election fails,
+	// a new election with a new term will be started. 3 attempts × 50ms = ~150ms,
+	// which is within the election timeout window (150-300ms).
+	MaxRequestVoteRetries = 3
+
+	// MaxAppendEntriesRetries controls retry behavior for AppendEntries RPCs
+	// Section 5.3 from the Raft paper states: "If followers crash or run slowly, or if
+	// network packets are lost, the leader retries AppendEntries RPCs indefinitely
+	// (even after it has responded to the client) until all followers eventually store
+	// all log entries."
+	// However, for the initial implementation with just heartbeats, we use a high but
+	// finite limit. When full log replication is implemented, this should be moved to
+	// per-follower replication goroutines with indefinite retry.
+	// TODO: Implement per-follower replication goroutines with indefinite retry
+	MaxAppendEntriesRetries = 100
 
 	// RetryBackoffBase is the base duration for exponential backoff between retries
 	RetryBackoffBase = 10 * time.Millisecond
+
+	// MaxRetryBackoff is the maximum backoff duration between retries
+	MaxRetryBackoff = 100 * time.Millisecond
 )
 
 type Transport struct {
@@ -62,7 +79,7 @@ func (t *Transport) RequestVote(ctx context.Context, peerID ServerID, req *proto
 	var resp *proto.RequestVoteResponse
 	var lastErr error
 
-	for attempt := 0; attempt < MaxRPCRetries; attempt++ {
+	for attempt := 0; attempt < MaxRequestVoteRetries; attempt++ {
 		// Create a new context with timeout for each attempt
 		rpcCtx, cancel := context.WithTimeout(ctx, RPCTimeout)
 
@@ -74,17 +91,27 @@ func (t *Transport) RequestVote(ctx context.Context, peerID ServerID, req *proto
 			return resp, nil
 		}
 
+		// Check if parent context is cancelled (e.g., server shutting down)
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("RequestVote to %s cancelled: %w", peerID, ctx.Err())
+		default:
+		}
+
 		// Don't sleep after the last attempt
-		if attempt < MaxRPCRetries-1 {
-			// Exponential backoff: 10ms, 20ms, 30ms, etc.
+		if attempt < MaxRequestVoteRetries-1 {
+			// Exponential backoff: 10ms, 20ms, 30ms
 			backoff := RetryBackoffBase * time.Duration(attempt+1)
+			if backoff > MaxRetryBackoff {
+				backoff = MaxRetryBackoff
+			}
 			time.Sleep(backoff)
 		}
 	}
 
 	// All retries exhausted - log once here
-	log.Printf("RequestVote to %s failed after %d attempts: %v", peerID, MaxRPCRetries, lastErr)
-	return nil, fmt.Errorf("RequestVote to %s failed after %d attempts: %w", peerID, MaxRPCRetries, lastErr)
+	log.Printf("[TRANSPORT] RequestVote to %s failed after %d attempts: %v", peerID, MaxRequestVoteRetries, lastErr)
+	return nil, fmt.Errorf("RequestVote to %s failed after %d attempts: %w", peerID, MaxRequestVoteRetries, lastErr)
 }
 
 func (t *Transport) AppendEntries(ctx context.Context, peerID ServerID, req *proto.AppendEntriesRequest) (*proto.AppendEntriesResponse, error) {
@@ -96,10 +123,12 @@ func (t *Transport) AppendEntries(ctx context.Context, peerID ServerID, req *pro
 	client := proto.NewRaftServiceClient(conn)
 
 	// Retry loop with timeout per attempt
+	// Section 5.3: "The leader retries AppendEntries RPCs indefinitely until all
+	// followers eventually store all log entries"
 	var resp *proto.AppendEntriesResponse
 	var lastErr error
 
-	for attempt := 0; attempt < MaxRPCRetries; attempt++ {
+	for attempt := 0; attempt < MaxAppendEntriesRetries; attempt++ {
 		// Create a new context with timeout for each attempt
 		rpcCtx, cancel := context.WithTimeout(ctx, RPCTimeout)
 
@@ -107,21 +136,42 @@ func (t *Transport) AppendEntries(ctx context.Context, peerID ServerID, req *pro
 		cancel() // Always clean up the context
 
 		if lastErr == nil {
-			// Success - return immediately
+			// Success - log if we had to retry
+			if attempt > 0 {
+				log.Printf("[TRANSPORT] AppendEntries to %s succeeded after %d retries", peerID, attempt)
+			}
 			return resp, nil
 		}
 
+		// Check if parent context is cancelled (leader stepping down, server shutting down, etc.)
+		select {
+		case <-ctx.Done():
+			log.Printf("[TRANSPORT] AppendEntries to %s cancelled after %d attempts: %v", peerID, attempt, ctx.Err())
+			return nil, fmt.Errorf("AppendEntries to %s cancelled: %w", peerID, ctx.Err())
+		default:
+		}
+
 		// Don't sleep after the last attempt
-		if attempt < MaxRPCRetries-1 {
-			// Exponential backoff: 10ms, 20ms, 30ms, etc.
+		if attempt < MaxAppendEntriesRetries-1 {
+			// Exponential backoff with cap
 			backoff := RetryBackoffBase * time.Duration(attempt+1)
+			if backoff > MaxRetryBackoff {
+				backoff = MaxRetryBackoff
+			}
 			time.Sleep(backoff)
+		}
+
+		// Log periodic progress for long-running retries
+		if attempt > 0 && attempt%10 == 0 {
+			log.Printf("[TRANSPORT] AppendEntries to %s still retrying (attempt %d/%d)", peerID, attempt, MaxAppendEntriesRetries)
 		}
 	}
 
 	// All retries exhausted - log once here
-	log.Printf("AppendEntries to %s failed after %d attempts: %v", peerID, MaxRPCRetries, lastErr)
-	return nil, fmt.Errorf("AppendEntries to %s failed after %d attempts: %w", peerID, MaxRPCRetries, lastErr)
+	// Note: In a full implementation with per-follower replication goroutines,
+	// this would continue retrying indefinitely as per the Raft paper
+	log.Printf("[TRANSPORT] AppendEntries to %s failed after %d attempts: %v", peerID, MaxAppendEntriesRetries, lastErr)
+	return nil, fmt.Errorf("AppendEntries to %s failed after %d attempts: %w", peerID, MaxAppendEntriesRetries, lastErr)
 }
 
 func (t *Transport) HeartbeatRPC(ctx context.Context, peerID ServerID) (*proto.AppendEntriesResponse, error) {
