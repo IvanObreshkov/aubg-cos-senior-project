@@ -42,6 +42,21 @@ type serverState struct {
 	// requests for the same term (client retries, duplicate deliveries, slow/late responses, etc.)
 	// Count each voter at most once per term.
 	votersThisTerm map[ServerID]struct{}
+
+	// commitIndex is the index of highest log entry known to be committed (initialized to 0, increases monotonically)
+	// as per Figure 2 from the [Raft paper](https://raft.github.io/raft.pdf)
+	commitIndex uint64
+	// lastApplied is the index of highest log entry applied to state machine (initialized to 0, increases monotonically)
+	// as per Figure 2 from the [Raft paper](https://raft.github.io/raft.pdf)
+	lastApplied uint64
+
+	// Leader-only volatile state (reinitialized after election)
+	// nextIndex is for each server, index of the next log entry to send to that server
+	// (initialized to leader last log index + 1) as per Figure 2 from the [Raft paper](https://raft.github.io/raft.pdf)
+	nextIndex map[ServerID]uint64
+	// matchIndex is for each server, index of highest log entry known to be replicated on server
+	// (initialized to 0, increases monotonically) as per Figure 2 from the [Raft paper](https://raft.github.io/raft.pdf)
+	matchIndex map[ServerID]uint64
 }
 
 func (s *serverState) getState() State {
