@@ -2,6 +2,7 @@ package server
 
 import (
 	"aubg-cos-senior-project/internal/pubsub"
+	"log"
 	"time"
 )
 
@@ -22,6 +23,8 @@ func (s *Orchestrator) Run() {
 	for {
 		select {
 		case <-s.electionTimeoutExpiredChan:
+			// Log that election timeout expired - the server state is checked in BeginElection
+			log.Printf("[ORCHESTRATOR] Election timeout expired, triggering election")
 			s.server.BeginElection()
 
 		case ev := <-s.voteReceivedChan:
@@ -31,6 +34,7 @@ func (s *Orchestrator) Run() {
 			s.server.OnElectionWon(ev.Payload)
 
 		case <-s.shutDownChan:
+			log.Printf("[ORCHESTRATOR] Shutdown signal received, stopping orchestrator")
 			return
 		}
 	}
