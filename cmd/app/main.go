@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	clusterSize := 2
+	clusterSize := 3
 	basePort := 50051
 
 	// Reserve addresses for the cluster
@@ -48,11 +48,12 @@ func reserveAddresses(clusterSize int, basePort int) []server.ServerAddress {
 
 func createCluster(addrs []server.ServerAddress) map[*server.Server]*server.Orchestrator {
 	serverToOrchestratorMap := make(map[*server.Server]*server.Orchestrator)
-	pubSub := pubsub.NewPubSub()
 
 	// First pass: create all servers so we can collect their IDs
+	// IMPORTANT: Each server gets its OWN PubSub instance to prevent cross-server event pollution
 	var servers []*server.Server
 	for _, addr := range addrs {
+		pubSub := pubsub.NewPubSub() // Create separate PubSub for each server
 		srv := server.NewServer(0, addr, nil, pubSub)
 		servers = append(servers, srv)
 	}
@@ -69,7 +70,8 @@ func createCluster(addrs []server.ServerAddress) map[*server.Server]*server.Orch
 		// Update the peers list for this server
 		srv.SetPeers(peerIDs)
 
-		orch := server.NewOrchestrator(pubSub, srv)
+		// Create orchestrator using the server's own PubSub instance
+		orch := server.NewOrchestrator(srv.GetPubSub(), srv)
 		serverToOrchestratorMap[srv] = orch
 	}
 
@@ -77,26 +79,48 @@ func createCluster(addrs []server.ServerAddress) map[*server.Server]*server.Orch
 }
 
 func bootCluster(serverToOrchestratorMap map[*server.Server]*server.Orchestrator, basePort int) {
-	i := 0
-	for srv, orch := range serverToOrchestratorMap {
-		// Start each server in a separate goroutine
-		go func(i int, s *server.Server) {
-			port := basePort + i
-			if err := s.StartServer(port); err != nil {
-				log.Printf("Server %v failed to boot due to err: %v", s.ID, err)
-			}
-		}(i, srv)
+	var wg sync.WaitGroup
 
-		// Start each server orchestrator in a separate goroutine
-		go orch.Run()
-
-		i++
-		// Small delay between server starts to prevent race conditions
-		time.Sleep(100 * time.Millisecond)
+	// Create deterministic port assignments by collecting servers into a slice first
+	servers := make([]*server.Server, 0, len(serverToOrchestratorMap))
+	for srv := range serverToOrchestratorMap {
+		servers = append(servers, srv)
 	}
 
-	log.Printf("Started %d servers and their orchestrators in the Raft cluster", len(serverToOrchestratorMap))
-	log.Println("Press Ctrl+C to stop all servers and their orchestrators")
+	// Start ALL servers first (without orchestrators) so they can all communicate
+	for i, srv := range servers {
+		wg.Add(1)
+		port := basePort + i
+		go func(s *server.Server, p int, idx int) {
+			defer wg.Done()
+			log.Printf("Starting server %d on port %d", idx, p)
+			if err := s.StartServer(p); err != nil {
+				log.Printf("Server %v failed to boot due to err: %v", s.ID, err)
+			}
+		}(srv, port, i)
+	}
+
+	// Wait for all servers to be listening
+	wg.Wait()
+	log.Printf("All %d servers are now listening", len(serverToOrchestratorMap))
+
+	// Small delay to ensure gRPC servers are fully accepting connections
+	time.Sleep(100 * time.Millisecond)
+
+	// Start orchestrators which will listen for election timeout events
+	for _, orch := range serverToOrchestratorMap {
+		go orch.Run()
+	}
+	log.Printf("Started %d orchestrators", len(serverToOrchestratorMap))
+
+	// Small delay to ensure orchestrators are ready to receive events
+	time.Sleep(100 * time.Millisecond)
+
+	// NOW start election timers - orchestrators are ready to handle events
+	for _, srv := range servers {
+		srv.StartElectionTimer()
+	}
+	log.Printf("Started election timers - cluster is ready")
 }
 
 func listenForShutdown(serverToOrchestratorMap map[*server.Server]*server.Orchestrator, done chan bool) {

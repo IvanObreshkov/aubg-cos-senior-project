@@ -19,7 +19,7 @@ func TrackElectionTimeoutJob(ctx serverCtx, electionTimeoutTimer *time.Timer, pu
 	stopJobCh := make(chan *pubsub.Event[struct{}], 1)
 	pubsub.Subscribe(pubSub, ServerShutDown, stopJobCh, pubsub.SubscriptionOptions{IsBlocking: false})
 
-	log.Printf("[JOB] Started TrackElectionTimeoutJob for server %v", ctx)
+	log.Printf("[JOB] Started TrackElectionTimeoutJob for server %+v", ctx)
 
 	for {
 		select {

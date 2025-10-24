@@ -100,6 +100,11 @@ func (s *Server) SetPeers(peerIDs []ServerID) {
 	s.transport = NewTransport(peerIDs)
 }
 
+// GetPubSub returns the server's PubSub client instance
+func (s *Server) GetPubSub() *pubsub.PubSubClient {
+	return s.pubSub
+}
+
 // RequestVote handles the RequestVote RPC call from a peer's client
 func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
 	s.mu.Lock()
@@ -107,6 +112,16 @@ func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest)
 
 	log.Printf("[SERVER-%s] [TERM-%d] [RPC] Received RequestVote from %s (candidateTerm=%d, lastLogIndex=%d, lastLogTerm=%d)",
 		s.ID, s.currentTerm, req.CandidateId, req.Term, req.LastLogIndex, req.LastLogTerm)
+
+	// Reject self-votes - this happens due to gRPC resolver routing
+	if ServerID(req.CandidateId) == s.ID {
+		log.Printf("[SERVER-%s] [TERM-%d] [RPC] Rejecting self-vote (routing bug)",
+			s.ID, s.currentTerm)
+		return &proto.RequestVoteResponse{
+			Term:        s.currentTerm,
+			VoteGranted: false,
+		}, nil
+	}
 
 	// Reply false if term < currentTerm
 	if req.Term < s.currentTerm {
@@ -139,8 +154,10 @@ func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest)
 		s.votedFor = (*ServerID)(&req.CandidateId)
 		log.Printf("[SERVER-%s] [TERM-%d] [RPC] Granting vote to %s (log is up-to-date, resetting election timeout)",
 			s.ID, s.currentTerm, req.CandidateId)
-		// Reset election timeout when granting a vote
-		s.electionTimeoutTimer.Reset(s.electionTimeout)
+		// Reset election timeout when granting a vote (if timer exists)
+		if s.electionTimeoutTimer != nil {
+			s.electionTimeoutTimer.Reset(s.electionTimeout)
+		}
 	} else {
 		if s.votedFor != nil && *s.votedFor != ServerID(req.CandidateId) {
 			log.Printf("[SERVER-%s] [TERM-%d] [RPC] Rejecting vote to %s (already voted for %s)",
@@ -218,9 +235,12 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 	}
 
 	// Reset election timeout since we received communication from a leader
-	log.Printf("[SERVER-%s] [TERM-%d] Resetting election timeout (received communication from Leader %s)",
-		s.ID, s.currentTerm, req.LeaderId)
-	s.electionTimeoutTimer.Reset(s.electionTimeout)
+	// Only reset if we have a timer (Leaders don't have election timeout timers)
+	if s.electionTimeoutTimer != nil {
+		log.Printf("[SERVER-%s] [TERM-%d] Resetting election timeout (received communication from Leader %s)",
+			s.ID, s.currentTerm, req.LeaderId)
+		s.electionTimeoutTimer.Reset(s.electionTimeout)
+	}
 
 	// For heartbeat (empty entries), return success with the current term
 	if len(req.Entries) == 0 {
@@ -247,12 +267,25 @@ func (s *Server) BeginElection() {
 	// We put a Lock as all updates must be atomic, to avoid race conditions
 	s.mu.Lock()
 
+	// Check if server has started yet (timer is initialized in StartServer)
+	if s.electionTimeoutTimer == nil {
+		log.Printf("[SERVER-%s] Server not started yet, cannot begin election", s.ID)
+		s.mu.Unlock()
+		return
+	}
+
 	// TOCTOU Protection: Only start election if we're a Follower or Candidate
 	// This prevents starting an election after AppendEntries made us a Follower
 	// in a higher term between the Orchestrator's check and this call.
 	if s.state != Follower && s.state != Candidate {
 		s.mu.Unlock()
 		return
+	}
+
+	// Detect split vote: if we're still a Candidate, the previous election failed
+	if s.state == Candidate {
+		log.Printf("[SERVER-%s] [TERM-%d] ⚠️  SPLIT VOTE detected - previous election failed, starting new election",
+			s.ID, s.currentTerm)
 	}
 
 	// Start on a clean state
@@ -264,7 +297,7 @@ func (s *Server) BeginElection() {
 
 	// 2. Transition to a Candidate state
 	s.state = Candidate
-	log.Printf("[SERVER-%s] [TERM-%d→%d] Transitioning %s → Candidate, starting election",
+	log.Printf("[SERVER-%v] [TERM-%d→%d] Transitioning %v → Candidate, starting election",
 		s.ID, oldTerm, s.currentTerm, Follower)
 
 	// 3. The server Votes for itself exactly once
@@ -272,6 +305,15 @@ func (s *Server) BeginElection() {
 	s.votersThisTerm[s.ID] = struct{}{}
 	log.Printf("[SERVER-%s] [TERM-%d] Voting for self (1/%d votes, need %d for quorum)",
 		s.ID, s.currentTerm, len(s.peers)+1, s.quorumSize())
+
+	// Reset election timeout with a NEW random value to prevent split votes
+	// Section 5.2: "Raft uses randomized election timeouts to ensure that split votes are rare
+	// and that they are resolved quickly"
+	oldTimeout := s.electionTimeout
+	s.electionTimeout = getElectionTimeoutMs()
+	s.electionTimeoutTimer.Reset(s.electionTimeout)
+	log.Printf("[SERVER-%s] [TERM-%d] Reset election timeout %v→%v (prevents synchronized elections)",
+		s.ID, s.currentTerm, oldTimeout, s.electionTimeout)
 
 	// Snapshot the term and peers for outbound RPCs to avoid race conditions. (In case any other thread changes these
 	// after we have released the lock)
@@ -372,6 +414,20 @@ func (s *Server) BeginElection() {
 func (s *Server) OnVoteGranted(from ServerID, term uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Ignore votes if we're not a Candidate anymore (already Leader/Follower)
+	if s.state != Candidate {
+		log.Printf("[SERVER-%s] [TERM-%d] Ignoring vote from %s (state=%s, not Candidate)",
+			s.ID, s.currentTerm, from, s.state)
+		return
+	}
+
+	// Ignore votes from old terms
+	if term != s.currentTerm {
+		log.Printf("[SERVER-%s] [TERM-%d] Ignoring vote from %s for old term %d",
+			s.ID, s.currentTerm, from, term)
+		return
+	}
 
 	// Check for duplicate vote
 	if _, dup := s.votersThisTerm[from]; dup {
@@ -574,14 +630,37 @@ func (s *Server) StartServer(port int) error {
 	s.grpcServer = grpc.NewServer(grpc.ConnectionTimeout(time.Second * 30))
 	proto.RegisterRaftServiceServer(s.grpcServer, s)
 
-	// Start the ElectionTimeout timer
-	s.electionTimeoutTimer = time.NewTimer(s.serverState.electionTimeout)
+	// Note: Election timer will be started later by StartElectionTimer()
+	// after orchestrators are ready to receive events
 
 	log.Printf("[SERVER-%s] [TERM-%d] Raft node running on %s with %d peers %v (electionTimeout=%v)",
 		s.ID, s.currentTerm, s.Address, len(s.peers), s.peers, s.serverState.electionTimeout)
 
-	// Track ElectionTimeout on the background (while waiting for Heartbeats as per Section 5.2 from the
-	// [Raft paper](https://raft.github.io/raft.pdf))
+	// Start gRPC server in a goroutine so this method doesn't block
+	go func() {
+		if err := s.grpcServer.Serve(lis); err != nil {
+			log.Printf("[SERVER-%s] gRPC server stopped: %v", s.ID, err)
+		}
+	}()
+
+	return nil
+}
+
+// StartElectionTimer initializes and starts the election timeout timer
+// This should be called AFTER orchestrators are ready to receive events
+func (s *Server) StartElectionTimer() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Add random startup jitter (0-150ms) to prevent all servers from timing out simultaneously
+	// This is critical for initial leader election in clusters where all servers start together
+	jitter := time.Duration(rand.Intn(150)) * time.Millisecond
+	initialTimeout := s.serverState.electionTimeout + jitter
+
+	// Initialize the timer with jittered timeout
+	s.electionTimeoutTimer = time.NewTimer(initialTimeout)
+
+	// Track ElectionTimeout on the background
 	ctx := serverCtx{
 		ID:    s.ID,
 		Addr:  s.Address,
@@ -590,8 +669,8 @@ func (s *Server) StartServer(port int) error {
 	}
 	go TrackElectionTimeoutJob(ctx, s.electionTimeoutTimer, s.pubSub)
 
-	// This one blocks as under the hood there is a call to lis.Accept which is a blocking operation.
-	return s.grpcServer.Serve(lis)
+	log.Printf("[SERVER-%s] [TERM-%d] Started election timer with jitter (base=%v, actual=%v)",
+		s.ID, s.currentTerm, s.serverState.electionTimeout, initialTimeout)
 }
 
 func (s *Server) GracefulShutdown() {
@@ -638,8 +717,8 @@ func NewServer(currentTerm uint64, addr ServerAddress, peers []ServerID, pubSub 
 
 	electionTimeout := getElectionTimeoutMs()
 
-	log.Printf("[SERVER-%s] Initializing new server at %s with %d peers (term=%d, electionTimeout=%v, state=Follower)",
-		serverID, addr, len(peers), term, electionTimeout)
+	log.Printf("[SERVER-%s] Initializing new server at %s (term=%d, electionTimeout=%v, state=Follower)",
+		serverID, addr, term, electionTimeout)
 
 	// https://go.dev/doc/effective_go#composite_literals
 	return &Server{
