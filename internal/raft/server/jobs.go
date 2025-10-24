@@ -19,15 +19,20 @@ func TrackElectionTimeoutJob(ctx serverCtx, electionTimeoutTimer *time.Timer, pu
 	stopJobCh := make(chan *pubsub.Event[struct{}], 1)
 	pubsub.Subscribe(pubSub, ServerShutDown, stopJobCh, pubsub.SubscriptionOptions{IsBlocking: false})
 
+	log.Printf("[JOB] Started TrackElectionTimeoutJob for server %v", ctx)
+
 	for {
 		select {
 		case expiredTime := <-electionTimeoutTimer.C:
-			log.Printf("Election timeout expired for server %v at %v", ctx, expiredTime)
+			// Use serverCtx fields directly
+			log.Printf("[JOB] [SERVER-%v] [TERM-%d] Election timeout expired at %v, publishing event",
+				ctx.ID, ctx.Term, expiredTime.Format(time.RFC3339Nano))
 			pubsub.Publish(pubSub, pubsub.NewEvent(ElectionTimeoutExpired, expiredTime))
 			// Once the timer expires, the timer.C channel will NOT receive any values again, until Reset() is called
 			// externally. This loop will now block until the next expiration of the timer after Reset has been called.
 		case <-stopJobCh:
 			// Stop the timer and exit the goroutine
+			log.Printf("[JOB] Stopping TrackElectionTimeoutJob for server %v", ctx)
 			electionTimeoutTimer.Stop()
 			return
 		}
