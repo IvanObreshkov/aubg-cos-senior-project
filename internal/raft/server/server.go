@@ -585,7 +585,7 @@ func (s *Server) StartServer(port int) error {
 	ctx := serverCtx{
 		ID:    s.ID,
 		Addr:  s.Address,
-		State: s.getState(),
+		State: s.state,
 		Term:  s.currentTerm,
 	}
 	go TrackElectionTimeoutJob(ctx, s.electionTimeoutTimer, s.pubSub)
