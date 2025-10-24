@@ -654,8 +654,13 @@ func (s *Server) StartElectionTimer() {
 
 	// Add random startup jitter (0-150ms) to prevent all servers from timing out simultaneously
 	// This is critical for initial leader election in clusters where all servers start together
+	baseTimeout := s.serverState.electionTimeout
 	jitter := time.Duration(rand.Intn(150)) * time.Millisecond
-	initialTimeout := s.serverState.electionTimeout + jitter
+	initialTimeout := baseTimeout + jitter
+
+	// Store the jittered timeout as the current election timeout
+	// This ensures consistency throughout the first election cycle
+	s.electionTimeout = initialTimeout
 
 	// Initialize the timer with jittered timeout
 	s.electionTimeoutTimer = time.NewTimer(initialTimeout)
@@ -670,7 +675,7 @@ func (s *Server) StartElectionTimer() {
 	go TrackElectionTimeoutJob(ctx, s.electionTimeoutTimer, s.pubSub)
 
 	log.Printf("[SERVER-%s] [TERM-%d] Started election timer with jitter (base=%v, actual=%v)",
-		s.ID, s.currentTerm, s.serverState.electionTimeout, initialTimeout)
+		s.ID, s.currentTerm, baseTimeout, initialTimeout)
 }
 
 func (s *Server) GracefulShutdown() {

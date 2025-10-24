@@ -299,7 +299,11 @@ func (p *PubSubClient) run() {
 
 		// Get the set of subscribers for this event type
 		if subscribers, ok := p.registry[msg.eventType]; ok {
-			log.Printf("[PubSubClient]: Broadcasting %v events to %d listeners.\n", msg.eventType, len(subscribers))
+			listenerWord := "listener"
+			if len(subscribers) != 1 {
+				listenerWord = "listeners"
+			}
+			log.Printf("[PubSubClient]: Broadcasting %v event to %d %s.\n", msg.eventType, len(subscribers), listenerWord)
 
 			// FAN-OUT: Iterate over all type-erased subscribers.
 			// Each subscriber's sendFunc closure knows how to convert the type-erased payload
