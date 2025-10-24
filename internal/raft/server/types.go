@@ -35,6 +35,7 @@ type serverCtx struct {
 	ID    ServerID
 	Addr  ServerAddress
 	State State
+	Term  uint64
 }
 
 // VoteGrantedPayload travels with VoteGranted events so the orchestrator can act on these.
