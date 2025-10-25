@@ -14,21 +14,20 @@ import (
 type serverState struct {
 	// Protects all fields below
 	mu sync.RWMutex
-	// TODO: (currentTerm and votedFor Updated on stable storage before responding to RPCs)
+
 	// The state of the server as per Section 5.1 from the [Raft paper](https://raft.github.io/raft.pdf). When a server
 	// initially starts it is a Follower as per Section 5.2 from the paper.
 	state State
 	// The latest term server has seen. It is a [logical clock](https://dl.acm.org/doi/pdf/10.1145/359545.359563) used
 	// by servers to detect obsolete info, such as stale leaders. It is initialized to 0 on first boot of the cluster,
 	// and increases monotonically, as per Section 5.1 from the [Raft paper](https://raft.github.io/raft.pdf)
+	// Updated on stable storage before responding to RPCs (Section 5.2)
 	currentTerm uint64
 	// The ID of the Candidate Server that the current Server has voted for in the currentTerm. It could be null at the
 	// beginning of a new term, as no votes are issued. This should be set to null when the Term changes, as votes in
 	// Raft are per Term.
+	// Updated on stable storage before responding to RPCs (Section 5.2)
 	votedFor *ServerID
-	// TODO: THis is property for each follower, maybe this should be a different type
-	// nextIndex is the index of the next LogEntry the leader will send to a follower
-	//nextIndex uint64
 
 	// ElectionTimeout is the current election timeout for the server. It is randomly chosen when the server is created.
 	// It should be used with a time.Timer, and the timer should be reset at the beginning of each new election and

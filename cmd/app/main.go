@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -15,6 +16,11 @@ import (
 func main() {
 	clusterSize := 3
 	basePort := 50051
+
+	// Create data directory for BBolt databases
+	if err := os.MkdirAll("./data", 0755); err != nil {
+		log.Fatalf("Failed to create data directory: %v", err)
+	}
 
 	// Reserve addresses for the cluster
 	addrs := reserveAddresses(clusterSize, basePort)

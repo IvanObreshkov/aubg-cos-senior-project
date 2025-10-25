@@ -120,6 +120,31 @@ func (s *Server) GetPubSub() *pubsub.PubSubClient {
 	return s.pubSub
 }
 
+// persistCurrentTerm persists the current term to stable storage
+// Section 5.2: "Updated on stable storage before responding to RPCs"
+func (s *Server) persistCurrentTerm(term uint64) error {
+	if err := s.Log.SetCurrentTerm(term); err != nil {
+		log.Printf("[SERVER-%s] Failed to persist current term %d: %v", s.ID, term, err)
+		return err
+	}
+	return nil
+}
+
+// persistVotedFor persists votedFor to stable storage
+// Section 5.2: "Updated on stable storage before responding to RPCs"
+func (s *Server) persistVotedFor(candidateID *ServerID) error {
+	var idStr *string
+	if candidateID != nil {
+		str := string(*candidateID)
+		idStr = &str
+	}
+	if err := s.Log.SetVotedFor(idStr); err != nil {
+		log.Printf("[SERVER-%s] Failed to persist votedFor: %v", s.ID, err)
+		return err
+	}
+	return nil
+}
+
 // RequestVote handles the RequestVote RPC call from a peer's client
 func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
 	s.mu.Lock()
