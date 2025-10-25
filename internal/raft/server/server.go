@@ -192,6 +192,22 @@ func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest)
 		}
 	}
 
+	// Section 6 optimization: "servers disregard RequestVote RPCs when they believe a current leader exists"
+	// If we've heard from a valid leader recently (within minimum election timeout), reject the vote.
+	// This prevents disruptions from servers that have been partitioned and are now rejoining.
+	if !s.lastLeaderContact.IsZero() {
+		minElectionTimeout := 150 * time.Millisecond // Minimum from our 150-300ms range
+		timeSinceLastContact := time.Since(s.lastLeaderContact)
+		if timeSinceLastContact < minElectionTimeout {
+			log.Printf("[SERVER-%s] [TERM-%d] [RPC] Rejecting vote to %s (heard from leader %v ago, within minimum election timeout)",
+				s.ID, s.currentTerm, req.CandidateId, timeSinceLastContact)
+			return &proto.RequestVoteResponse{
+				Term:        s.currentTerm,
+				VoteGranted: false,
+			}, nil
+		}
+	}
+
 	// Grant vote if: (votedFor is null or candidateId) AND candidate's log is at least as up-to-date
 	// Section 5.4.1: The RequestVote RPC implements this restriction: the RPC includes information about the
 	// candidate's log, and the voter denies its vote if its own log is more up-to-date than that of the candidate.
@@ -304,6 +320,9 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 			s.ID, s.currentTerm, req.LeaderId)
 		s.electionTimeoutTimer.Reset(s.electionTimeout)
 	}
+
+	// Update last leader contact time for Section 6 optimization
+	s.lastLeaderContact = time.Now()
 
 	// For heartbeat (empty entries), return success with the current term
 	if len(req.Entries) == 0 {

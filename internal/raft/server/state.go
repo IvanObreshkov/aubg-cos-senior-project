@@ -56,6 +56,11 @@ type serverState struct {
 	// matchIndex is for each server, index of highest log entry known to be replicated on server
 	// (initialized to 0, increases monotonically) as per Figure 2 from the [Raft paper](https://raft.github.io/raft.pdf)
 	matchIndex map[ServerID]uint64
+
+	// lastLeaderContact tracks the last time we received communication from a valid leader.
+	// Used for Section 6 optimization: servers disregard RequestVote RPCs when they believe
+	// a current leader exists (within minimum election timeout of last leader contact).
+	lastLeaderContact time.Time
 }
 
 func (s *serverState) getState() State {
@@ -147,4 +152,18 @@ func (s *serverState) clearVoters() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.votersThisTerm = nil
+}
+
+// getLastLeaderContact returns the time of last contact with a valid leader
+func (s *serverState) getLastLeaderContact() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastLeaderContact
+}
+
+// setLastLeaderContact updates the time of last contact with a valid leader
+func (s *serverState) setLastLeaderContact(t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastLeaderContact = t
 }
