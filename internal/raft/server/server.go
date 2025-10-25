@@ -60,8 +60,35 @@ type Server struct {
 	pubSub *pubsub.PubSubClient
 }
 
+// getLatestConfig returns the latest configuration (may be uncommitted)
+func (s *Server) getLatestConfig() *proto.Configuration {
+	return s.latestConfig
+}
+
+// getCommittedConfig returns the committed configuration
+func (s *Server) getCommittedConfig() *proto.Configuration {
+	return s.committedConfig
+}
+
 // quorumSize calculates the number of nodes required to achieve a quorum (majority), required to agree on a decision
+// Section 6: During joint consensus, need majority in BOTH old and new configurations
 func (s *Server) quorumSize() int {
+	// Check if we're in joint consensus mode
+	latestConfig := s.getLatestConfig()
+	if latestConfig != nil && latestConfig.IsJoint {
+		// During joint consensus, we need quorum in both configurations
+		// This method returns the quorum for the new configuration
+		// The caller must also check the old configuration separately
+		return s.quorumSizeForConfig(latestConfig)
+	}
+
+	// Use committed configuration if available
+	committedConfig := s.getCommittedConfig()
+	if committedConfig != nil {
+		return s.quorumSizeForConfig(committedConfig)
+	}
+
+	// Fallback to peers-based calculation
 	voters := len(s.peers) + 1 // + self
 	return voters/2 + 1
 }
@@ -113,6 +140,43 @@ func (s *Server) isLogUpToDate(candidateLastLogIndex, candidateLastLogTerm uint6
 func (s *Server) SetPeers(peerIDs []ServerID) {
 	s.peers = peerIDs
 	s.transport = NewTransport(peerIDs)
+}
+
+// SetPeersWithAddresses updates the list of peers with both IDs and addresses,
+// and properly initializes the configuration for the cluster
+func (s *Server) SetPeersWithAddresses(peers map[ServerID]ServerAddress) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Extract peer IDs for the transport
+	peerIDs := make([]ServerID, 0, len(peers))
+	for id := range peers {
+		peerIDs = append(peerIDs, id)
+	}
+	s.peers = peerIDs
+	s.transport = NewTransport(peerIDs)
+
+	// Initialize configuration with ALL servers in the cluster
+	servers := []*proto.ServerConfig{
+		{Id: string(s.ID), Address: string(s.Address)}, // Self
+	}
+	for id, addr := range peers {
+		servers = append(servers, &proto.ServerConfig{
+			Id:      string(id),
+			Address: string(addr),
+		})
+	}
+
+	initialConfig := &proto.Configuration{
+		Servers: servers,
+		IsJoint: false,
+	}
+
+	s.latestConfig = initialConfig
+	s.committedConfig = initialConfig
+
+	log.Printf("[SERVER-%s] Initialized configuration with %d servers (self + %d peers)",
+		s.ID, len(servers), len(peers))
 }
 
 // GetPubSub returns the server's PubSub client instance
@@ -475,10 +539,13 @@ func (s *Server) BeginElection() {
 	if err := s.Log.SetCurrentTerm(s.currentTerm); err != nil {
 		log.Printf("[SERVER-%s] Error persisting current term: %v", s.ID, err)
 	}
+
 	votedForStr := string(s.ID)
 	if err := s.Log.SetVotedFor(&votedForStr); err != nil {
 		log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
 	}
+
+	log.Printf("[SERVER-%s] [TERM-%d] DEBUG: Finished persisting state", s.ID, s.currentTerm)
 
 	// Reset election timeout with a NEW random value to prevent split votes
 	// Section 5.2: "Raft uses randomized election timeouts to ensure that split votes are rare
@@ -1071,9 +1138,15 @@ func (s *Server) applyCommittedEntries() {
 
 	// Apply each entry to the state machine
 	for _, entry := range entries {
-		if s.StateMachine != nil {
-			// Apply the command to the state machine
-			// Pass a slice containing just this entry
+		// Check if this is a configuration entry (Section 6)
+		if entry.Type == proto.LogEntryType_LOG_CONFIGURATION {
+			// Apply configuration change
+			if err := s.applyConfigurationEntry(entry); err != nil {
+				log.Printf("[SERVER-%s] Error applying configuration entry %d: %v",
+					s.ID, entry.Index, err)
+			}
+		} else if s.StateMachine != nil {
+			// Regular command - apply to state machine
 			s.StateMachine.Apply([]proto.LogEntry{*entry})
 		}
 
@@ -1082,8 +1155,8 @@ func (s *Server) applyCommittedEntries() {
 		s.lastApplied = entry.Index
 		s.mu.Unlock()
 
-		log.Printf("[SERVER-%s] Applied log entry %d to state machine",
-			s.ID, entry.Index)
+		log.Printf("[SERVER-%s] Applied log entry %d to state machine (type=%v)",
+			s.ID, entry.Index, entry.Type)
 	}
 }
 
@@ -1415,7 +1488,7 @@ func NewServer(currentTerm uint64, addr ServerAddress, peers []ServerID, pubSub 
 		serverID, addr, term, electionTimeout)
 
 	// https://go.dev/doc/effective_go#composite_literals
-	return &Server{
+	server := &Server{
 		serverState: serverState{
 			state:           Follower,
 			currentTerm:     term,
@@ -1429,4 +1502,9 @@ func NewServer(currentTerm uint64, addr ServerAddress, peers []ServerID, pubSub 
 		peers:     peers,
 		pubSub:    pubSub,
 	}
+
+	// Initialize configuration (Section 6)
+	server.initializeConfiguration()
+
+	return server
 }

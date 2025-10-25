@@ -60,6 +60,36 @@ message LogEntry {
   bytes command = 2;
   // index of the entry in the log
   uint64 index = 3;
+  // type of log entry (command, configuration, etc.)
+  LogEntryType type = 4;
+  // configuration data (only populated when type is LOG_CONFIGURATION)
+  Configuration configuration = 5;
+}
+
+// Type of log entry
+enum LogEntryType {
+  // Regular command for state machine
+  LOG_COMMAND = 0;
+  // Configuration change entry (Section 6)
+  LOG_CONFIGURATION = 1;
+}
+
+// Server configuration entry (Section 6: Cluster membership changes)
+message ServerConfig {
+  // unique server identifier
+  string id = 1;
+  // network address of the server
+  string address = 2;
+}
+
+// Cluster configuration (Section 6: Cluster membership changes)
+message Configuration {
+  // List of servers in the configuration
+  repeated ServerConfig servers = 1;
+  // Whether this is a joint consensus configuration (C_old,new)
+  bool is_joint = 2;
+  // If is_joint is true, this contains the old configuration servers
+  repeated ServerConfig old_servers = 3;
 }
 
 
@@ -70,4 +100,54 @@ service RaftService {
 
   // AppendEntries RPC (Section 5.3 from the [Raft paper](https://raft.github.io/raft.pdf))
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+
+  // AddServer RPC (Section 6 from the [Raft paper](https://raft.github.io/raft.pdf))
+  // Adds a new server to the cluster configuration
+  rpc AddServer(AddServerRequest) returns (AddServerResponse);
+
+  // RemoveServer RPC (Section 6 from the [Raft paper](https://raft.github.io/raft.pdf))
+  // Removes a server from the cluster configuration
+  rpc RemoveServer(RemoveServerRequest) returns (RemoveServerResponse);
+}
+
+// AddServer RPC request (Section 6)
+message AddServerRequest {
+  // ID of the new server to add
+  string server_id = 1;
+  // Network address of the new server
+  string server_address = 2;
+}
+
+// AddServer RPC response (Section 6)
+message AddServerResponse {
+  // Status of the configuration change
+  ConfigChangeStatus status = 1;
+  // ID of the current leader (for client redirection if not leader)
+  string leader_id = 2;
+}
+
+// RemoveServer RPC request (Section 6)
+message RemoveServerRequest {
+  // ID of the server to remove
+  string server_id = 1;
+}
+
+// RemoveServer RPC response (Section 6)
+message RemoveServerResponse {
+  // Status of the configuration change
+  ConfigChangeStatus status = 1;
+  // ID of the current leader (for client redirection if not leader)
+  string leader_id = 2;
+}
+
+// Status of a configuration change operation
+enum ConfigChangeStatus {
+  // Configuration change succeeded
+  OK = 0;
+  // Not the leader, cannot process configuration change
+  NOT_LEADER = 1;
+  // Configuration change already in progress
+  IN_PROGRESS = 2;
+  // Configuration change timeout
+  TIMEOUT = 3;
 }

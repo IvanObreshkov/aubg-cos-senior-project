@@ -55,26 +55,29 @@ func reserveAddresses(clusterSize int, basePort int) []server.ServerAddress {
 func createCluster(addrs []server.ServerAddress) map[*server.Server]*server.Orchestrator {
 	serverToOrchestratorMap := make(map[*server.Server]*server.Orchestrator)
 
-	// First pass: create all servers so we can collect their IDs
+	// First pass: create all servers so we can collect their IDs and addresses
 	// IMPORTANT: Each server gets its OWN PubSub instance to prevent cross-server event pollution
 	var servers []*server.Server
+	serverAddresses := make(map[server.ServerID]server.ServerAddress) // Track all server ID->Address mappings
+
 	for _, addr := range addrs {
 		pubSub := pubsub.NewPubSub() // Create separate PubSub for each server
 		srv := server.NewServer(0, addr, nil, pubSub)
 		servers = append(servers, srv)
+		serverAddresses[srv.ID] = addr
 	}
 
-	// Second pass: update each server with peer IDs (all servers except itself)
-	for i, srv := range servers {
-		var peerIDs []server.ServerID
-		for j, otherSrv := range servers {
+	// Second pass: update each server with peer IDs AND addresses (all servers except itself)
+	for _, srv := range servers {
+		peers := make(map[server.ServerID]server.ServerAddress)
+		for id, addr := range serverAddresses {
 			// Exclude current server
-			if j != i {
-				peerIDs = append(peerIDs, otherSrv.ID)
+			if id != srv.ID {
+				peers[id] = addr
 			}
 		}
-		// Update the peers list for this server
-		srv.SetPeers(peerIDs)
+		// Update the peers list with addresses for this server
+		srv.SetPeersWithAddresses(peers)
 
 		// Create orchestrator using the server's own PubSub instance
 		orch := server.NewOrchestrator(srv.GetPubSub(), srv)

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"aubg-cos-senior-project/internal/raft/proto"
 	"sync"
 	"time"
 )
@@ -61,6 +62,19 @@ type serverState struct {
 	// Used for Section 6 optimization: servers disregard RequestVote RPCs when they believe
 	// a current leader exists (within minimum election timeout of last leader contact).
 	lastLeaderContact time.Time
+
+	// Configuration state (Section 6: Cluster membership changes)
+	// committedConfig is the latest committed configuration (C_old or C_new)
+	// This is the configuration used once joint consensus is complete
+	committedConfig *proto.Configuration
+	// latestConfig is the latest configuration seen (may be uncommitted)
+	// During joint consensus, this is C_old,new
+	latestConfig *proto.Configuration
+	// configChangeInProgress tracks whether a configuration change is currently being processed
+	// Only one configuration change can be in progress at a time (Section 6)
+	configChangeInProgress bool
+	// configChangeIndex is the log index of the configuration change being applied
+	configChangeIndex uint64
 }
 
 func (s *serverState) getState() State {
@@ -166,4 +180,60 @@ func (s *serverState) setLastLeaderContact(t time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastLeaderContact = t
+}
+
+// getCommittedConfig returns the latest committed configuration
+func (s *serverState) getCommittedConfig() *proto.Configuration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.committedConfig
+}
+
+// setCommittedConfig updates the committed configuration
+func (s *serverState) setCommittedConfig(config *proto.Configuration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.committedConfig = config
+}
+
+// getLatestConfig returns the latest configuration (may be uncommitted)
+func (s *serverState) getLatestConfig() *proto.Configuration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.latestConfig
+}
+
+// setLatestConfig updates the latest configuration
+func (s *serverState) setLatestConfig(config *proto.Configuration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.latestConfig = config
+}
+
+// isConfigChangeInProgress returns whether a configuration change is in progress
+func (s *serverState) isConfigChangeInProgress() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.configChangeInProgress
+}
+
+// setConfigChangeInProgress updates the configuration change in progress flag
+func (s *serverState) setConfigChangeInProgress(inProgress bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.configChangeInProgress = inProgress
+}
+
+// getConfigChangeIndex returns the log index of the configuration change being applied
+func (s *serverState) getConfigChangeIndex() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.configChangeIndex
+}
+
+// setConfigChangeIndex updates the log index of the configuration change being applied
+func (s *serverState) setConfigChangeIndex(index uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.configChangeIndex = index
 }

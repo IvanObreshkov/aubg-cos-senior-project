@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v6.32.1
-// source: raft.proto
+// source: internal/raft/proto/raft.proto
 
 package proto
 
@@ -21,6 +21,8 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	RaftService_RequestVote_FullMethodName   = "/proto.RaftService/RequestVote"
 	RaftService_AppendEntries_FullMethodName = "/proto.RaftService/AppendEntries"
+	RaftService_AddServer_FullMethodName     = "/proto.RaftService/AddServer"
+	RaftService_RemoveServer_FullMethodName  = "/proto.RaftService/RemoveServer"
 )
 
 // RaftServiceClient is the client API for RaftService service.
@@ -33,6 +35,12 @@ type RaftServiceClient interface {
 	RequestVote(ctx context.Context, in *RequestVoteRequest, opts ...grpc.CallOption) (*RequestVoteResponse, error)
 	// AppendEntries RPC (Section 5.3 from the [Raft paper](https://raft.github.io/raft.pdf))
 	AppendEntries(ctx context.Context, in *AppendEntriesRequest, opts ...grpc.CallOption) (*AppendEntriesResponse, error)
+	// AddServer RPC (Section 6 from the [Raft paper](https://raft.github.io/raft.pdf))
+	// Adds a new server to the cluster configuration
+	AddServer(ctx context.Context, in *AddServerRequest, opts ...grpc.CallOption) (*AddServerResponse, error)
+	// RemoveServer RPC (Section 6 from the [Raft paper](https://raft.github.io/raft.pdf))
+	// Removes a server from the cluster configuration
+	RemoveServer(ctx context.Context, in *RemoveServerRequest, opts ...grpc.CallOption) (*RemoveServerResponse, error)
 }
 
 type raftServiceClient struct {
@@ -63,6 +71,26 @@ func (c *raftServiceClient) AppendEntries(ctx context.Context, in *AppendEntries
 	return out, nil
 }
 
+func (c *raftServiceClient) AddServer(ctx context.Context, in *AddServerRequest, opts ...grpc.CallOption) (*AddServerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddServerResponse)
+	err := c.cc.Invoke(ctx, RaftService_AddServer_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *raftServiceClient) RemoveServer(ctx context.Context, in *RemoveServerRequest, opts ...grpc.CallOption) (*RemoveServerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveServerResponse)
+	err := c.cc.Invoke(ctx, RaftService_RemoveServer_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RaftServiceServer is the server API for RaftService service.
 // All implementations must embed UnimplementedRaftServiceServer
 // for forward compatibility.
@@ -73,6 +101,12 @@ type RaftServiceServer interface {
 	RequestVote(context.Context, *RequestVoteRequest) (*RequestVoteResponse, error)
 	// AppendEntries RPC (Section 5.3 from the [Raft paper](https://raft.github.io/raft.pdf))
 	AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error)
+	// AddServer RPC (Section 6 from the [Raft paper](https://raft.github.io/raft.pdf))
+	// Adds a new server to the cluster configuration
+	AddServer(context.Context, *AddServerRequest) (*AddServerResponse, error)
+	// RemoveServer RPC (Section 6 from the [Raft paper](https://raft.github.io/raft.pdf))
+	// Removes a server from the cluster configuration
+	RemoveServer(context.Context, *RemoveServerRequest) (*RemoveServerResponse, error)
 	mustEmbedUnimplementedRaftServiceServer()
 }
 
@@ -88,6 +122,12 @@ func (UnimplementedRaftServiceServer) RequestVote(context.Context, *RequestVoteR
 }
 func (UnimplementedRaftServiceServer) AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AppendEntries not implemented")
+}
+func (UnimplementedRaftServiceServer) AddServer(context.Context, *AddServerRequest) (*AddServerResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddServer not implemented")
+}
+func (UnimplementedRaftServiceServer) RemoveServer(context.Context, *RemoveServerRequest) (*RemoveServerResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RemoveServer not implemented")
 }
 func (UnimplementedRaftServiceServer) mustEmbedUnimplementedRaftServiceServer() {}
 func (UnimplementedRaftServiceServer) testEmbeddedByValue()                     {}
@@ -146,6 +186,42 @@ func _RaftService_AppendEntries_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RaftService_AddServer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddServerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RaftServiceServer).AddServer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RaftService_AddServer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RaftServiceServer).AddServer(ctx, req.(*AddServerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RaftService_RemoveServer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveServerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RaftServiceServer).RemoveServer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RaftService_RemoveServer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RaftServiceServer).RemoveServer(ctx, req.(*RemoveServerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RaftService_ServiceDesc is the grpc.ServiceDesc for RaftService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -161,7 +237,15 @@ var RaftService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "AppendEntries",
 			Handler:    _RaftService_AppendEntries_Handler,
 		},
+		{
+			MethodName: "AddServer",
+			Handler:    _RaftService_AddServer_Handler,
+		},
+		{
+			MethodName: "RemoveServer",
+			Handler:    _RaftService_RemoveServer_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "raft.proto",
+	Metadata: "internal/raft/proto/raft.proto",
 }
