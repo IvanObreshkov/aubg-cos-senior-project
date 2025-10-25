@@ -4,6 +4,7 @@ import (
 	"aubg-cos-senior-project/internal/pubsub"
 	"aubg-cos-senior-project/internal/raft"
 	"aubg-cos-senior-project/internal/raft/proto"
+	"aubg-cos-senior-project/internal/raft/storage"
 	"context"
 	"fmt"
 	"log"
@@ -38,7 +39,7 @@ type Server struct {
 	// A Log is a collection of proto.LogEntry objects. If State is Leader, this collection is Append Only as per the Leader
 	// Append-Only Property in Figure 3 from the [Raft paper](https://raft.github.io/raft.pdf)
 	// TODO: (Updated on stable storage before responding to RPCs)
-	Log raft.LogStorage
+	Log storage.LogStorage
 	// StateMachine is the state machine of the Server as per Section 2 from the
 	// [Raft paper](https://raft.github.io/raft.pdf)
 	StateMachine raft.StateMachine
@@ -68,9 +69,23 @@ func (s *Server) quorumSize() int {
 // getLastLogIndexAndTerm returns the index and term of the last entry in the log.
 // Returns (0, 0) if the log is empty, as per Section 5.4.1 from the [Raft paper](https://raft.github.io/raft.pdf)
 func (s *Server) getLastLogIndexAndTerm() (uint64, uint64) {
-	// TODO: Implement this once LogStorage interface is complete
-	// For now, return (0, 0) indicating an empty log
-	return 0, 0
+	lastIndex, err := s.Log.GetLastIndex()
+	if err != nil {
+		log.Printf("[SERVER-%s] Error getting last log index: %v", s.ID, err)
+		return 0, 0
+	}
+
+	if lastIndex == 0 {
+		return 0, 0
+	}
+
+	lastTerm, err := s.Log.GetLastTerm()
+	if err != nil {
+		log.Printf("[SERVER-%s] Error getting last log term: %v", s.ID, err)
+		return 0, 0
+	}
+
+	return lastIndex, lastTerm
 }
 
 // isLogUpToDate checks if the candidate's log is at least as up-to-date as the receiver's log.
@@ -142,6 +157,14 @@ func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest)
 		s.state = Follower
 		s.votedFor = nil
 		s.votersThisTerm = nil
+
+		// Persist the new term and reset votedFor
+		if err := s.Log.SetCurrentTerm(s.currentTerm); err != nil {
+			log.Printf("[SERVER-%s] Error persisting current term: %v", s.ID, err)
+		}
+		if err := s.Log.SetVotedFor(nil); err != nil {
+			log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
+		}
 	}
 
 	// Grant vote if: (votedFor is null or candidateId) AND candidate's log is at least as up-to-date
@@ -154,6 +177,13 @@ func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest)
 		s.votedFor = (*ServerID)(&req.CandidateId)
 		log.Printf("[SERVER-%s] [TERM-%d] [RPC] Granting vote to %s (log is up-to-date, resetting election timeout)",
 			s.ID, s.currentTerm, req.CandidateId)
+
+		// Persist votedFor to storage (Section 5.2: "Updated on stable storage before responding to RPCs")
+		candidateIDStr := string(*s.votedFor)
+		if err := s.Log.SetVotedFor(&candidateIDStr); err != nil {
+			log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
+		}
+
 		// Reset election timeout when granting a vote (if timer exists)
 		if s.electionTimeoutTimer != nil {
 			s.electionTimeoutTimer.Reset(s.electionTimeout)
@@ -223,6 +253,14 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 		s.nextIndex = nil
 		s.matchIndex = nil
 
+		// Persist currentTerm and reset votedFor
+		if err := s.Log.SetCurrentTerm(s.currentTerm); err != nil {
+			log.Printf("[SERVER-%s] Error persisting current term: %v", s.ID, err)
+		}
+		if err := s.Log.SetVotedFor(nil); err != nil {
+			log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
+		}
+
 		// If we were a leader, stop sending heartbeats
 		if wasLeader {
 			log.Printf("[SERVER-%s] [TERM-%d] Stopping heartbeats (stepped down from Leader)",
@@ -252,12 +290,95 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 		}, nil
 	}
 
-	// TODO: Handle actual log entries here...
-	log.Printf("[SERVER-%s] [TERM-%d] [RPC] Log replication not yet implemented, rejecting AppendEntries",
-		s.ID, s.currentTerm)
+	// Handle log replication (Section 5.3)
+
+	// Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
+	if req.PrevLogIndex > 0 {
+		prevEntry, err := s.Log.GetEntry(req.PrevLogIndex)
+		if err != nil {
+			// Entry doesn't exist at prevLogIndex
+			log.Printf("[SERVER-%s] [TERM-%d] [RPC] Rejecting AppendEntries: no entry at prevLogIndex=%d",
+				s.ID, s.currentTerm, req.PrevLogIndex)
+			return &proto.AppendEntriesResponse{
+				Term:    s.currentTerm,
+				Success: false,
+			}, nil
+		}
+
+		if prevEntry.Term != req.PrevLogTerm {
+			// Term mismatch at prevLogIndex
+			log.Printf("[SERVER-%s] [TERM-%d] [RPC] Rejecting AppendEntries: term mismatch at prevLogIndex=%d (expected=%d, got=%d)",
+				s.ID, s.currentTerm, req.PrevLogIndex, req.PrevLogTerm, prevEntry.Term)
+			return &proto.AppendEntriesResponse{
+				Term:    s.currentTerm,
+				Success: false,
+			}, nil
+		}
+	}
+
+	// If an existing entry conflicts with a new one (same index but different terms),
+	// delete the existing entry and all that follow it (Section 5.3)
+	for _, newEntry := range req.Entries {
+		existingEntry, err := s.Log.GetEntry(newEntry.Index)
+		if err == nil && existingEntry.Term != newEntry.Term {
+			// Conflict found - delete this entry and all following entries
+			log.Printf("[SERVER-%s] [TERM-%d] [RPC] Log conflict at index %d (existing term=%d, new term=%d), truncating log",
+				s.ID, s.currentTerm, newEntry.Index, existingEntry.Term, newEntry.Term)
+			if err := s.Log.DeleteEntriesFrom(newEntry.Index); err != nil {
+				log.Printf("[SERVER-%s] Error deleting conflicting log entries: %v", s.ID, err)
+				return &proto.AppendEntriesResponse{
+					Term:    s.currentTerm,
+					Success: false,
+				}, nil
+			}
+			break
+		}
+	}
+
+	// Append any new entries not already in the log
+	var entriesToAppend []*proto.LogEntry
+	for _, protoEntry := range req.Entries {
+		// Check if entry already exists
+		_, err := s.Log.GetEntry(protoEntry.Index)
+		if err != nil {
+			// Entry doesn't exist, add it to the list
+			entriesToAppend = append(entriesToAppend, protoEntry)
+		}
+	}
+
+	if len(entriesToAppend) > 0 {
+		if err := s.Log.AppendEntries(entriesToAppend); err != nil {
+			log.Printf("[SERVER-%s] Error appending log entries: %v", s.ID, err)
+			return &proto.AppendEntriesResponse{
+				Term:    s.currentTerm,
+				Success: false,
+			}, nil
+		}
+		log.Printf("[SERVER-%s] [TERM-%d] [RPC] Appended %d new entries to log",
+			s.ID, s.currentTerm, len(entriesToAppend))
+	}
+
+	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+	if req.LeaderCommit > s.commitIndex {
+		lastNewIndex := req.Entries[len(req.Entries)-1].Index
+		if req.LeaderCommit < lastNewIndex {
+			s.commitIndex = req.LeaderCommit
+		} else {
+			s.commitIndex = lastNewIndex
+		}
+		log.Printf("[SERVER-%s] [TERM-%d] Updated commitIndex to %d",
+			s.ID, s.currentTerm, s.commitIndex)
+
+		// Apply newly committed entries to state machine
+		go s.applyCommittedEntries()
+	}
+
+	log.Printf("[SERVER-%s] [TERM-%d] [RPC] Successfully replicated %d entries from Leader %s",
+		s.ID, s.currentTerm, len(req.Entries), req.LeaderId)
+
 	return &proto.AppendEntriesResponse{
 		Term:    s.currentTerm,
-		Success: false,
+		Success: true,
 	}, nil
 }
 
@@ -305,6 +426,15 @@ func (s *Server) BeginElection() {
 	s.votersThisTerm[s.ID] = struct{}{}
 	log.Printf("[SERVER-%s] [TERM-%d] Voting for self (1/%d votes, need %d for quorum)",
 		s.ID, s.currentTerm, len(s.peers)+1, s.quorumSize())
+
+	// Persist currentTerm and votedFor to storage (Section 5.2: "Updated on stable storage before responding to RPCs")
+	if err := s.Log.SetCurrentTerm(s.currentTerm); err != nil {
+		log.Printf("[SERVER-%s] Error persisting current term: %v", s.ID, err)
+	}
+	votedForStr := string(s.ID)
+	if err := s.Log.SetVotedFor(&votedForStr); err != nil {
+		log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
+	}
 
 	// Reset election timeout with a NEW random value to prevent split votes
 	// Section 5.2: "Raft uses randomized election timeouts to ensure that split votes are rare
@@ -373,6 +503,14 @@ func (s *Server) BeginElection() {
 
 					log.Printf("[SERVER-%s] [TERM-%d→%d] Discovered higher term in RequestVote response from %s, reverting %s → Follower",
 						s.ID, oldTerm, s.currentTerm, peer, oldState)
+
+					// Persist term change
+					if err := s.Log.SetCurrentTerm(s.currentTerm); err != nil {
+						log.Printf("[SERVER-%s] Error persisting current term: %v", s.ID, err)
+					}
+					if err := s.Log.SetVotedFor(nil); err != nil {
+						log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
+					}
 
 					s.mu.Unlock()
 
@@ -611,6 +749,486 @@ func (s *Server) SendHeartbeats() {
 	}
 }
 
+// SubmitCommand is called by clients to submit a command to the Raft cluster.
+// Section 5.3: "Clients send all of their requests to the leader... If a client contacts a follower,
+// the follower redirects it to the leader."
+// Returns an error if this server is not the leader or if the command cannot be appended to the log.
+func (s *Server) SubmitCommand(command []byte) error {
+	s.mu.Lock()
+
+	// Check if we're the leader
+	if s.state != Leader {
+		s.mu.Unlock()
+		return fmt.Errorf("not the leader")
+	}
+
+	// Get the next index for this entry
+	lastIndex, err := s.Log.GetLastIndex()
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("failed to get last index: %w", err)
+	}
+	nextIndex := lastIndex + 1
+
+	// Create a new log entry with the command
+	entry := &proto.LogEntry{
+		Index:   nextIndex,
+		Term:    s.currentTerm,
+		Command: command,
+	}
+
+	// Append the entry to our log
+	err = s.Log.AppendEntry(entry)
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("failed to append entry to log: %w", err)
+	}
+
+	log.Printf("[SERVER-%s] [TERM-%d] Appended command to log at index %d",
+		s.ID, s.currentTerm, nextIndex)
+
+	s.mu.Unlock()
+
+	// Replicate to followers immediately (don't wait for heartbeat interval)
+	// This ensures faster replication of client commands
+	go s.ReplicateToFollowers()
+
+	return nil
+}
+
+// ReplicateToFollowers replicates log entries to all followers in parallel.
+// This is similar to SendHeartbeats but includes actual log entries.
+func (s *Server) ReplicateToFollowers() {
+	s.mu.RLock()
+
+	// Check if we're still the leader
+	if s.state != Leader {
+		s.mu.RUnlock()
+		return
+	}
+
+	term := s.currentTerm
+	peerIDs := append([]ServerID(nil), s.peers...)
+	commitIndex := s.commitIndex
+	s.mu.RUnlock()
+
+	// Send AppendEntries to each follower in parallel
+	for _, peerID := range peerIDs {
+		go s.sendAppendEntriesToPeer(peerID, term, commitIndex)
+	}
+}
+
+// sendAppendEntriesToPeer sends AppendEntries RPC to a specific peer, handling log replication.
+// This implements the leader's log replication logic from Section 5.3.
+func (s *Server) sendAppendEntriesToPeer(peerID ServerID, term uint64, commitIndex uint64) {
+	s.mu.RLock()
+
+	// Get the next index to send to this peer
+	nextIndex, exists := s.nextIndex[peerID]
+	if !exists {
+		s.mu.RUnlock()
+		return
+	}
+
+	// Get the previous log entry's index and term
+	prevLogIndex := nextIndex - 1
+	prevLogTerm := uint64(0)
+
+	if prevLogIndex > 0 {
+		entry, err := s.Log.GetEntry(prevLogIndex)
+		if err != nil {
+			s.mu.RUnlock()
+			log.Printf("[SERVER-%s] Error getting entry at index %d: %v", s.ID, prevLogIndex, err)
+			return
+		}
+		prevLogTerm = entry.Term
+	}
+
+	// Get entries to send (from nextIndex onwards)
+	lastIndex, err := s.Log.GetLastIndex()
+	if err != nil {
+		s.mu.RUnlock()
+		log.Printf("[SERVER-%s] Error getting last index: %v", s.ID, err)
+		return
+	}
+
+	var entries []*proto.LogEntry
+	if lastIndex >= nextIndex {
+		storageEntries, err := s.Log.GetEntries(nextIndex, lastIndex)
+		if err != nil {
+			s.mu.RUnlock()
+			log.Printf("[SERVER-%s] Error getting entries %d-%d: %v", s.ID, nextIndex, lastIndex, err)
+			return
+		}
+
+		// Convert storage.LogEntry to proto.LogEntry
+		for _, e := range storageEntries {
+			entries = append(entries, &proto.LogEntry{
+				Term:    e.Term,
+				Command: e.Command,
+			})
+		}
+	}
+
+	s.mu.RUnlock()
+
+	// Build the AppendEntries request
+	req := &proto.AppendEntriesRequest{
+		Term:         term,
+		LeaderId:     string(s.ID),
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      entries,
+		LeaderCommit: commitIndex,
+	}
+
+	// Send the RPC
+	resp, err := s.transport.AppendEntries(context.Background(), peerID, req)
+	if err != nil {
+		log.Printf("[TRANSPORT] AppendEntries to %s failed: %v", peerID, err)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check if we're still the leader and in the same term
+	if s.state != Leader || s.currentTerm != term {
+		return
+	}
+
+	// Handle response
+	if resp.Term > s.currentTerm {
+		// Discovered a higher term, step down
+		log.Printf("[SERVER-%s] [TERM-%d→%d] Discovered higher term in AppendEntries response from %s, stepping down",
+			s.ID, s.currentTerm, resp.Term, peerID)
+		s.currentTerm = resp.Term
+		s.state = Follower
+		s.votedFor = nil
+		s.votersThisTerm = nil
+		s.nextIndex = nil
+		s.matchIndex = nil
+
+		// Persist the term change
+		if err := s.Log.SetCurrentTerm(s.currentTerm); err != nil {
+			log.Printf("[SERVER-%s] Error persisting current term: %v", s.ID, err)
+		}
+		if err := s.Log.SetVotedFor(nil); err != nil {
+			log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
+		}
+
+		s.StopHeartbeats()
+		return
+	}
+
+	if resp.Success {
+		// Successfully replicated entries
+		// Update nextIndex and matchIndex for this follower
+		if len(entries) > 0 {
+			lastEntryIndex := prevLogIndex + uint64(len(entries))
+			s.nextIndex[peerID] = lastEntryIndex + 1
+			s.matchIndex[peerID] = lastEntryIndex
+
+			log.Printf("[SERVER-%s] [TERM-%d] Successfully replicated %d entries to %s (matchIndex=%d)",
+				s.ID, term, len(entries), peerID, lastEntryIndex)
+
+			// Check if we can advance commitIndex
+			s.updateCommitIndex()
+		}
+	} else {
+		// Log inconsistency, decrement nextIndex and retry
+		if s.nextIndex[peerID] > 1 {
+			s.nextIndex[peerID]--
+			log.Printf("[SERVER-%s] [TERM-%d] Log inconsistency with %s, decremented nextIndex to %d",
+				s.ID, term, peerID, s.nextIndex[peerID])
+
+			// Retry immediately
+			go s.sendAppendEntriesToPeer(peerID, term, commitIndex)
+		}
+	}
+}
+
+// updateCommitIndex updates the leader's commitIndex based on matchIndex of followers.
+// Section 5.3 and 5.4: "If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
+// and log[N].term == currentTerm: set commitIndex = N"
+// Must be called with s.mu held.
+func (s *Server) updateCommitIndex() {
+	// Build a sorted list of match indices (including our own last log index)
+	lastIndex, err := s.Log.GetLastIndex()
+	if err != nil {
+		log.Printf("[SERVER-%s] Error getting last index: %v", s.ID, err)
+		return
+	}
+
+	indices := []uint64{lastIndex}
+	for _, matchIndex := range s.matchIndex {
+		indices = append(indices, matchIndex)
+	}
+
+	// Sort in descending order
+	for i := 0; i < len(indices); i++ {
+		for j := i + 1; j < len(indices); j++ {
+			if indices[j] > indices[i] {
+				indices[i], indices[j] = indices[j], indices[i]
+			}
+		}
+	}
+
+	// The median is the N where a majority have matchIndex[i] ≥ N
+	quorum := s.quorumSize()
+	if quorum <= len(indices) {
+		newCommitIndex := indices[quorum-1]
+
+		// Only update if:
+		// 1. newCommitIndex > commitIndex
+		// 2. log[newCommitIndex].term == currentTerm (safety check from Section 5.4.2)
+		if newCommitIndex > s.commitIndex {
+			entry, err := s.Log.GetEntry(newCommitIndex)
+			if err != nil {
+				log.Printf("[SERVER-%s] Error getting entry at index %d: %v", s.ID, newCommitIndex, err)
+				return
+			}
+
+			if entry.Term == s.currentTerm {
+				oldCommitIndex := s.commitIndex
+				s.commitIndex = newCommitIndex
+				log.Printf("[SERVER-%s] [TERM-%d] Advanced commitIndex from %d to %d",
+					s.ID, s.currentTerm, oldCommitIndex, newCommitIndex)
+
+				// Apply newly committed entries to the state machine
+				go s.applyCommittedEntries()
+			}
+		}
+	}
+}
+
+// applyCommittedEntries applies all committed but not yet applied log entries to the state machine
+// This implements the rule: "If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine"
+func (s *Server) applyCommittedEntries() {
+	s.mu.Lock()
+
+	// Check if there are entries to apply
+	if s.commitIndex <= s.lastApplied {
+		s.mu.Unlock()
+		return
+	}
+
+	startIndex := s.lastApplied + 1
+	endIndex := s.commitIndex
+	s.mu.Unlock()
+
+	// Fetch entries to apply (outside the lock to avoid blocking)
+	entries, err := s.Log.GetEntries(startIndex, endIndex)
+	if err != nil {
+		log.Printf("[SERVER-%s] Error fetching committed entries [%d,%d]: %v",
+			s.ID, startIndex, endIndex, err)
+		return
+	}
+
+	// Apply each entry to the state machine
+	for _, entry := range entries {
+		if s.StateMachine != nil {
+			// Apply the command to the state machine
+			// Pass a slice containing just this entry
+			s.StateMachine.Apply([]proto.LogEntry{*entry})
+		}
+
+		// Update lastApplied
+		s.mu.Lock()
+		s.lastApplied = entry.Index
+		s.mu.Unlock()
+
+		log.Printf("[SERVER-%s] Applied log entry %d to state machine",
+			s.ID, entry.Index)
+	}
+}
+
+// ReplicateCommand is called by clients to replicate a command. Only Leaders can accept commands.
+// Section 5.3: "If command received from client: append entry to local log, respond after entry applied to state machine"
+func (s *Server) ReplicateCommand(command []byte) error {
+	s.mu.Lock()
+
+	// Only leaders can accept commands
+	if s.state != Leader {
+		s.mu.Unlock()
+		return fmt.Errorf("not a leader")
+	}
+
+	// Get the next log index
+	lastIndex, err := s.Log.GetLastIndex()
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("failed to get last log index: %w", err)
+	}
+
+	nextIndex := lastIndex + 1
+	currentTerm := s.currentTerm
+
+	// Create the new log entry
+	entry := &proto.LogEntry{
+		Index:   nextIndex,
+		Term:    currentTerm,
+		Command: command,
+	}
+
+	// Append to local log
+	if err := s.Log.AppendEntry(entry); err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("failed to append entry to log: %w", err)
+	}
+
+	log.Printf("[SERVER-%s] [TERM-%d] Appended command to log at index %d",
+		s.ID, currentTerm, nextIndex)
+
+	s.mu.Unlock()
+
+	// Replicate to followers
+	s.replicateToFollowers()
+
+	return nil
+}
+
+// replicateToFollowers sends AppendEntries RPCs to all followers to replicate log entries
+func (s *Server) replicateToFollowers() {
+	s.mu.RLock()
+	if s.state != Leader {
+		s.mu.RUnlock()
+		return
+	}
+
+	currentTerm := s.currentTerm
+	peerIDs := append([]ServerID(nil), s.peers...)
+	commitIndex := s.commitIndex
+	s.mu.RUnlock()
+
+	for _, peerID := range peerIDs {
+		go s.replicateToPeer(peerID, currentTerm, commitIndex)
+	}
+}
+
+// replicateToPeer sends AppendEntries RPC to a specific peer
+func (s *Server) replicateToPeer(peerID ServerID, term uint64, leaderCommit uint64) {
+	s.mu.RLock()
+	nextIndex := s.nextIndex[peerID]
+	s.mu.RUnlock()
+
+	// Get the previous log entry (the one right before nextIndex)
+	var prevLogIndex uint64
+	var prevLogTerm uint64
+
+	if nextIndex > 1 {
+		prevLogIndex = nextIndex - 1
+		prevEntry, err := s.Log.GetEntry(prevLogIndex)
+		if err != nil {
+			log.Printf("[SERVER-%s] Error getting log entry %d for peer %s: %v",
+				s.ID, prevLogIndex, peerID, err)
+			return
+		}
+		prevLogTerm = prevEntry.Term
+	}
+
+	// Get entries to send (from nextIndex onwards)
+	entries, err := s.Log.GetEntriesFrom(nextIndex)
+	if err != nil {
+		log.Printf("[SERVER-%s] Error getting log entries from %d: %v",
+			s.ID, nextIndex, err)
+		return
+	}
+
+	// Convert to proto entries
+	var protoEntries []*proto.LogEntry
+	for _, entry := range entries {
+		protoEntries = append(protoEntries, &proto.LogEntry{
+			Index:   entry.Index,
+			Term:    entry.Term,
+			Command: entry.Command,
+		})
+	}
+
+	// Send AppendEntries RPC
+	req := &proto.AppendEntriesRequest{
+		Term:         term,
+		LeaderId:     string(s.ID),
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      protoEntries,
+		LeaderCommit: leaderCommit,
+	}
+
+	resp, err := s.transport.AppendEntries(context.Background(), peerID, req)
+	if err != nil {
+		// Transport already logged the error
+		return
+	}
+
+	// Handle response
+	s.handleAppendEntriesResponse(peerID, req, resp)
+}
+
+// handleAppendEntriesResponse processes the response from an AppendEntries RPC
+func (s *Server) handleAppendEntriesResponse(peerID ServerID, req *proto.AppendEntriesRequest, resp *proto.AppendEntriesResponse) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// If we're no longer a leader or term has changed, ignore the response
+	if s.state != Leader || s.currentTerm != req.Term {
+		return
+	}
+
+	// If response contains a higher term, step down
+	if resp.Term > s.currentTerm {
+		log.Printf("[SERVER-%s] [TERM-%d→%d] Discovered higher term in AppendEntries response, stepping down",
+			s.ID, s.currentTerm, resp.Term)
+		s.currentTerm = resp.Term
+		s.state = Follower
+		s.votedFor = nil
+		s.votersThisTerm = nil
+		s.nextIndex = nil
+		s.matchIndex = nil
+
+		// Persist the term change
+		if err := s.Log.SetCurrentTerm(s.currentTerm); err != nil {
+			log.Printf("[SERVER-%s] Error persisting current term: %v", s.ID, err)
+		}
+		if err := s.Log.SetVotedFor(nil); err != nil {
+			log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
+		}
+
+		s.mu.Unlock()
+		s.StopHeartbeats()
+		s.mu.Lock()
+		return
+	}
+
+	if resp.Success {
+		// Update nextIndex and matchIndex for this peer
+		if len(req.Entries) > 0 {
+			lastEntryIndex := req.Entries[len(req.Entries)-1].Index
+			s.nextIndex[peerID] = lastEntryIndex + 1
+			s.matchIndex[peerID] = lastEntryIndex
+
+			log.Printf("[SERVER-%s] [TERM-%d] Updated peer %s: nextIndex=%d, matchIndex=%d",
+				s.ID, s.currentTerm, peerID, s.nextIndex[peerID], s.matchIndex[peerID])
+
+			// Check if we can advance commitIndex
+			s.updateCommitIndex()
+		}
+	} else {
+		// Replication failed - decrement nextIndex and retry
+		if s.nextIndex[peerID] > 1 {
+			s.nextIndex[peerID]--
+			log.Printf("[SERVER-%s] [TERM-%d] AppendEntries to %s failed, decrementing nextIndex to %d",
+				s.ID, s.currentTerm, peerID, s.nextIndex[peerID])
+
+			// Retry replication in background
+			go s.replicateToPeer(peerID, s.currentTerm, s.commitIndex)
+		}
+	}
+}
+
+// updateCommitIndex checks if we can advance the commitIndex based on matchIndex values
+// Section 5.3: "If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
+
 // StartServer starts a new Raft node on the given port
 func (s *Server) StartServer(port int) error {
 	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
@@ -709,11 +1327,6 @@ func (s *Server) ForceShutdown() {
 }
 
 func NewServer(currentTerm uint64, addr ServerAddress, peers []ServerID, pubSub *pubsub.PubSubClient) *Server {
-	var term uint64 = 0
-	if currentTerm != 0 {
-		term = currentTerm
-	}
-
 	// Generate a unique ID for this server
 	serverID := ServerID(uuid.New().String())
 
@@ -721,6 +1334,38 @@ func NewServer(currentTerm uint64, addr ServerAddress, peers []ServerID, pubSub 
 	RegisterResolverPeer(serverID, addr)
 
 	electionTimeout := getElectionTimeoutMs()
+
+	// Initialize BBolt storage
+	// Use server ID in the path to ensure each server has its own database
+	storagePath := fmt.Sprintf("./data/raft-%s.db", serverID)
+	store, err := storage.NewBboltStorage(storagePath)
+	if err != nil {
+		log.Fatalf("[SERVER-%s] Failed to initialize storage: %v", serverID, err)
+	}
+
+	// Load persisted state from storage
+	persistedTerm, err := store.GetCurrentTerm()
+	if err != nil {
+		log.Fatalf("[SERVER-%s] Failed to load current term: %v", serverID, err)
+	}
+
+	// Use persisted term if it's higher than the provided one
+	term := currentTerm
+	if persistedTerm > term {
+		term = persistedTerm
+	}
+
+	// Load votedFor from storage
+	persistedVotedFor, err := store.GetVotedFor()
+	if err != nil {
+		log.Fatalf("[SERVER-%s] Failed to load votedFor: %v", serverID, err)
+	}
+
+	var votedFor *ServerID
+	if persistedVotedFor != nil {
+		id := ServerID(*persistedVotedFor)
+		votedFor = &id
+	}
 
 	log.Printf("[SERVER-%s] Initializing new server at %s (term=%d, electionTimeout=%v, state=Follower)",
 		serverID, addr, term, electionTimeout)
@@ -730,10 +1375,12 @@ func NewServer(currentTerm uint64, addr ServerAddress, peers []ServerID, pubSub 
 		serverState: serverState{
 			state:           Follower,
 			currentTerm:     term,
+			votedFor:        votedFor,
 			electionTimeout: electionTimeout,
 		},
 		ID:        serverID,
 		Address:   addr,
+		Log:       store,
 		transport: NewTransport(peers),
 		peers:     peers,
 		pubSub:    pubSub,
