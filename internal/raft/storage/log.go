@@ -1,4 +1,8 @@
-package raft
+package storage
+
+import (
+	"aubg-cos-senior-project/internal/raft/proto"
+)
 
 /*
 Notes from Section 5.3
@@ -42,7 +46,51 @@ Maybe think about stable storage or use a simple k,v data structure in memory. R
 Idempotency for commands as mentioned in Section 8 is implemented via clients sending UID attached to every command
 and the state machine is responsible for tracking these UIDs and associated responses
 Check Section 8 for more info.
-
 */
 type LogStorage interface {
+	// Log Entry Operations
+
+	// AppendEntry appends a single log entry to the log
+	AppendEntry(entry *proto.LogEntry) error
+
+	// AppendEntries appends multiple log entries to the log
+	AppendEntries(entries []*proto.LogEntry) error
+
+	// GetEntry retrieves a log entry at the specified index
+	GetEntry(index uint64) (*proto.LogEntry, error)
+
+	// GetEntries retrieves log entries from startIndex (inclusive) to endIndex (inclusive)
+	GetEntries(startIndex, endIndex uint64) ([]*proto.LogEntry, error)
+
+	// GetEntriesFrom retrieves all log entries starting from the given index
+	GetEntriesFrom(startIndex uint64) ([]*proto.LogEntry, error)
+
+	// DeleteEntriesFrom deletes all log entries starting from the given index (inclusive)
+	// This is used to resolve log conflicts as per Section 5.3
+	DeleteEntriesFrom(index uint64) error
+
+	// GetLastIndex returns the index of the last log entry (0 if log is empty)
+	GetLastIndex() (uint64, error)
+
+	// GetLastTerm returns the term of the last log entry (0 if log is empty)
+	GetLastTerm() (uint64, error)
+
+	// Persistent State Operations (Section 5.2: "Updated on stable storage before responding to RPCs")
+
+	// GetCurrentTerm retrieves the current term from persistent storage
+	GetCurrentTerm() (uint64, error)
+
+	// SetCurrentTerm persists the current term to storage
+	SetCurrentTerm(term uint64) error
+
+	// GetVotedFor retrieves the candidate ID this server voted for in the current term
+	GetVotedFor() (*string, error)
+
+	// SetVotedFor persists the candidate ID this server voted for
+	SetVotedFor(candidateID *string) error
+
+	// Utility Operations
+
+	// Close closes the storage connection
+	Close() error
 }
