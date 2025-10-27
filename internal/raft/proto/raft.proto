@@ -2,6 +2,10 @@ syntax = "proto3";
 
 package proto;
 
+/*
+To generate .pb.go files run `protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative internal/raft/proto/raft.proto` from the root directory
+ */
+
 // The go_package option in Protocol Buffers specifies the Go import path for the generated Go code from this protobuf
 // file.
 // https://stackoverflow.com/questions/66321215/what-is-the-go-package-option-used-for-in-a-protocol-buffer-file
@@ -92,23 +96,46 @@ message Configuration {
   repeated ServerConfig old_servers = 3;
 }
 
-
-// A contract between the gRPC Sever and Client
-service RaftService {
-  // RequestVote RPC (Section 5.2 from the [Raft paper](https://raft.github.io/raft.pdf))
-  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
-
-  // AppendEntries RPC (Section 5.3 from the [Raft paper](https://raft.github.io/raft.pdf))
-  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
-
-  // AddServer RPC (Section 6 from the [Raft paper](https://raft.github.io/raft.pdf))
-  // Adds a new server to the cluster configuration
-  rpc AddServer(AddServerRequest) returns (AddServerResponse);
-
-  // RemoveServer RPC (Section 6 from the [Raft paper](https://raft.github.io/raft.pdf))
-  // Removes a server from the cluster configuration
-  rpc RemoveServer(RemoveServerRequest) returns (RemoveServerResponse);
+// ClientCommand RPC request (Section 5.3: client interaction)
+message ClientCommandRequest {
+  // The command to be replicated and applied
+  bytes command = 1;
 }
+
+// ClientCommand RPC response
+message ClientCommandResponse {
+  // Whether the command was successfully committed
+  bool success = 1;
+  // The log index where the command was committed (if successful)
+  uint64 index = 2;
+  // The ID of the current leader (for client redirection if this server is not the leader)
+  string leader_id = 3;
+}
+
+// GetServerState RPC request (for debugging/demo)
+message GetServerStateRequest {
+}
+
+// GetServerState RPC response
+message GetServerStateResponse {
+  // Server ID
+  string server_id = 1;
+  // Current term
+  uint64 current_term = 2;
+  // Server state (Follower, Candidate, Leader)
+  string state = 3;
+  // Last log index
+  uint64 last_log_index = 4;
+  // Commit index
+  uint64 commit_index = 5;
+  // Last applied index
+  uint64 last_applied = 6;
+  // Leader ID (if known)
+  string leader_id = 7;
+  // Number of log entries
+  uint64 log_entries_count = 8;
+}
+
 
 // AddServer RPC request (Section 6)
 message AddServerRequest {
@@ -151,3 +178,27 @@ enum ConfigChangeStatus {
   // Configuration change timeout
   TIMEOUT = 3;
 }
+
+// A contract between the gRPC Server and Client
+service RaftService {
+  // RequestVote RPC (Section 5.2 from the [Raft paper](https://raft.github.io/raft.pdf))
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+
+  // AppendEntries RPC (Section 5.3 from the [Raft paper](https://raft.github.io/raft.pdf))
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+
+  // ClientCommand RPC allows clients to submit commands to the Raft cluster (Section 5.3)
+  rpc ClientCommand(ClientCommandRequest) returns (ClientCommandResponse);
+
+  // GetServerState RPC allows clients to query server state for debugging/demo
+  rpc GetServerState(GetServerStateRequest) returns (GetServerStateResponse);
+
+  // AddServer RPC (Section 6 from the [Raft paper](https://raft.github.io/raft.pdf))
+  // Adds a new server to the cluster configuration
+  rpc AddServer(AddServerRequest) returns (AddServerResponse);
+
+  // RemoveServer RPC (Section 6 from the [Raft paper](https://raft.github.io/raft.pdf))
+  // Removes a server from the cluster configuration
+  rpc RemoveServer(RemoveServerRequest) returns (RemoveServerResponse);
+}
+

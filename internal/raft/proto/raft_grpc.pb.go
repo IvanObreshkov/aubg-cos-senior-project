@@ -19,22 +19,28 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RaftService_RequestVote_FullMethodName   = "/proto.RaftService/RequestVote"
-	RaftService_AppendEntries_FullMethodName = "/proto.RaftService/AppendEntries"
-	RaftService_AddServer_FullMethodName     = "/proto.RaftService/AddServer"
-	RaftService_RemoveServer_FullMethodName  = "/proto.RaftService/RemoveServer"
+	RaftService_RequestVote_FullMethodName    = "/proto.RaftService/RequestVote"
+	RaftService_AppendEntries_FullMethodName  = "/proto.RaftService/AppendEntries"
+	RaftService_ClientCommand_FullMethodName  = "/proto.RaftService/ClientCommand"
+	RaftService_GetServerState_FullMethodName = "/proto.RaftService/GetServerState"
+	RaftService_AddServer_FullMethodName      = "/proto.RaftService/AddServer"
+	RaftService_RemoveServer_FullMethodName   = "/proto.RaftService/RemoveServer"
 )
 
 // RaftServiceClient is the client API for RaftService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// A contract between the gRPC Sever and Client
+// A contract between the gRPC Server and Client
 type RaftServiceClient interface {
 	// RequestVote RPC (Section 5.2 from the [Raft paper](https://raft.github.io/raft.pdf))
 	RequestVote(ctx context.Context, in *RequestVoteRequest, opts ...grpc.CallOption) (*RequestVoteResponse, error)
 	// AppendEntries RPC (Section 5.3 from the [Raft paper](https://raft.github.io/raft.pdf))
 	AppendEntries(ctx context.Context, in *AppendEntriesRequest, opts ...grpc.CallOption) (*AppendEntriesResponse, error)
+	// ClientCommand RPC allows clients to submit commands to the Raft cluster (Section 5.3)
+	ClientCommand(ctx context.Context, in *ClientCommandRequest, opts ...grpc.CallOption) (*ClientCommandResponse, error)
+	// GetServerState RPC allows clients to query server state for debugging/demo
+	GetServerState(ctx context.Context, in *GetServerStateRequest, opts ...grpc.CallOption) (*GetServerStateResponse, error)
 	// AddServer RPC (Section 6 from the [Raft paper](https://raft.github.io/raft.pdf))
 	// Adds a new server to the cluster configuration
 	AddServer(ctx context.Context, in *AddServerRequest, opts ...grpc.CallOption) (*AddServerResponse, error)
@@ -71,6 +77,26 @@ func (c *raftServiceClient) AppendEntries(ctx context.Context, in *AppendEntries
 	return out, nil
 }
 
+func (c *raftServiceClient) ClientCommand(ctx context.Context, in *ClientCommandRequest, opts ...grpc.CallOption) (*ClientCommandResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClientCommandResponse)
+	err := c.cc.Invoke(ctx, RaftService_ClientCommand_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *raftServiceClient) GetServerState(ctx context.Context, in *GetServerStateRequest, opts ...grpc.CallOption) (*GetServerStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetServerStateResponse)
+	err := c.cc.Invoke(ctx, RaftService_GetServerState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *raftServiceClient) AddServer(ctx context.Context, in *AddServerRequest, opts ...grpc.CallOption) (*AddServerResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AddServerResponse)
@@ -95,12 +121,16 @@ func (c *raftServiceClient) RemoveServer(ctx context.Context, in *RemoveServerRe
 // All implementations must embed UnimplementedRaftServiceServer
 // for forward compatibility.
 //
-// A contract between the gRPC Sever and Client
+// A contract between the gRPC Server and Client
 type RaftServiceServer interface {
 	// RequestVote RPC (Section 5.2 from the [Raft paper](https://raft.github.io/raft.pdf))
 	RequestVote(context.Context, *RequestVoteRequest) (*RequestVoteResponse, error)
 	// AppendEntries RPC (Section 5.3 from the [Raft paper](https://raft.github.io/raft.pdf))
 	AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error)
+	// ClientCommand RPC allows clients to submit commands to the Raft cluster (Section 5.3)
+	ClientCommand(context.Context, *ClientCommandRequest) (*ClientCommandResponse, error)
+	// GetServerState RPC allows clients to query server state for debugging/demo
+	GetServerState(context.Context, *GetServerStateRequest) (*GetServerStateResponse, error)
 	// AddServer RPC (Section 6 from the [Raft paper](https://raft.github.io/raft.pdf))
 	// Adds a new server to the cluster configuration
 	AddServer(context.Context, *AddServerRequest) (*AddServerResponse, error)
@@ -122,6 +152,12 @@ func (UnimplementedRaftServiceServer) RequestVote(context.Context, *RequestVoteR
 }
 func (UnimplementedRaftServiceServer) AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AppendEntries not implemented")
+}
+func (UnimplementedRaftServiceServer) ClientCommand(context.Context, *ClientCommandRequest) (*ClientCommandResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ClientCommand not implemented")
+}
+func (UnimplementedRaftServiceServer) GetServerState(context.Context, *GetServerStateRequest) (*GetServerStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetServerState not implemented")
 }
 func (UnimplementedRaftServiceServer) AddServer(context.Context, *AddServerRequest) (*AddServerResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AddServer not implemented")
@@ -186,6 +222,42 @@ func _RaftService_AppendEntries_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RaftService_ClientCommand_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClientCommandRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RaftServiceServer).ClientCommand(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RaftService_ClientCommand_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RaftServiceServer).ClientCommand(ctx, req.(*ClientCommandRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RaftService_GetServerState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetServerStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RaftServiceServer).GetServerState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RaftService_GetServerState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RaftServiceServer).GetServerState(ctx, req.(*GetServerStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RaftService_AddServer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AddServerRequest)
 	if err := dec(in); err != nil {
@@ -236,6 +308,14 @@ var RaftService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AppendEntries",
 			Handler:    _RaftService_AppendEntries_Handler,
+		},
+		{
+			MethodName: "ClientCommand",
+			Handler:    _RaftService_ClientCommand_Handler,
+		},
+		{
+			MethodName: "GetServerState",
+			Handler:    _RaftService_GetServerState_Handler,
 		},
 		{
 			MethodName: "AddServer",

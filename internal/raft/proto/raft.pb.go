@@ -602,6 +602,262 @@ func (x *Configuration) GetOldServers() []*ServerConfig {
 	return nil
 }
 
+// ClientCommand RPC request (Section 5.3: client interaction)
+type ClientCommandRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The command to be replicated and applied
+	Command       []byte `protobuf:"bytes,1,opt,name=command,proto3" json:"command,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ClientCommandRequest) Reset() {
+	*x = ClientCommandRequest{}
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClientCommandRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClientCommandRequest) ProtoMessage() {}
+
+func (x *ClientCommandRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClientCommandRequest.ProtoReflect.Descriptor instead.
+func (*ClientCommandRequest) Descriptor() ([]byte, []int) {
+	return file_internal_raft_proto_raft_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ClientCommandRequest) GetCommand() []byte {
+	if x != nil {
+		return x.Command
+	}
+	return nil
+}
+
+// ClientCommand RPC response
+type ClientCommandResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Whether the command was successfully committed
+	Success bool `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	// The log index where the command was committed (if successful)
+	Index uint64 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`
+	// The ID of the current leader (for client redirection if this server is not the leader)
+	LeaderId      string `protobuf:"bytes,3,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ClientCommandResponse) Reset() {
+	*x = ClientCommandResponse{}
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClientCommandResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClientCommandResponse) ProtoMessage() {}
+
+func (x *ClientCommandResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClientCommandResponse.ProtoReflect.Descriptor instead.
+func (*ClientCommandResponse) Descriptor() ([]byte, []int) {
+	return file_internal_raft_proto_raft_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ClientCommandResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *ClientCommandResponse) GetIndex() uint64 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *ClientCommandResponse) GetLeaderId() string {
+	if x != nil {
+		return x.LeaderId
+	}
+	return ""
+}
+
+// GetServerState RPC request (for debugging/demo)
+type GetServerStateRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetServerStateRequest) Reset() {
+	*x = GetServerStateRequest{}
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetServerStateRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetServerStateRequest) ProtoMessage() {}
+
+func (x *GetServerStateRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetServerStateRequest.ProtoReflect.Descriptor instead.
+func (*GetServerStateRequest) Descriptor() ([]byte, []int) {
+	return file_internal_raft_proto_raft_proto_rawDescGZIP(), []int{9}
+}
+
+// GetServerState RPC response
+type GetServerStateResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Server ID
+	ServerId string `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
+	// Current term
+	CurrentTerm uint64 `protobuf:"varint,2,opt,name=current_term,json=currentTerm,proto3" json:"current_term,omitempty"`
+	// Server state (Follower, Candidate, Leader)
+	State string `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`
+	// Last log index
+	LastLogIndex uint64 `protobuf:"varint,4,opt,name=last_log_index,json=lastLogIndex,proto3" json:"last_log_index,omitempty"`
+	// Commit index
+	CommitIndex uint64 `protobuf:"varint,5,opt,name=commit_index,json=commitIndex,proto3" json:"commit_index,omitempty"`
+	// Last applied index
+	LastApplied uint64 `protobuf:"varint,6,opt,name=last_applied,json=lastApplied,proto3" json:"last_applied,omitempty"`
+	// Leader ID (if known)
+	LeaderId string `protobuf:"bytes,7,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
+	// Number of log entries
+	LogEntriesCount uint64 `protobuf:"varint,8,opt,name=log_entries_count,json=logEntriesCount,proto3" json:"log_entries_count,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *GetServerStateResponse) Reset() {
+	*x = GetServerStateResponse{}
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetServerStateResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetServerStateResponse) ProtoMessage() {}
+
+func (x *GetServerStateResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetServerStateResponse.ProtoReflect.Descriptor instead.
+func (*GetServerStateResponse) Descriptor() ([]byte, []int) {
+	return file_internal_raft_proto_raft_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *GetServerStateResponse) GetServerId() string {
+	if x != nil {
+		return x.ServerId
+	}
+	return ""
+}
+
+func (x *GetServerStateResponse) GetCurrentTerm() uint64 {
+	if x != nil {
+		return x.CurrentTerm
+	}
+	return 0
+}
+
+func (x *GetServerStateResponse) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *GetServerStateResponse) GetLastLogIndex() uint64 {
+	if x != nil {
+		return x.LastLogIndex
+	}
+	return 0
+}
+
+func (x *GetServerStateResponse) GetCommitIndex() uint64 {
+	if x != nil {
+		return x.CommitIndex
+	}
+	return 0
+}
+
+func (x *GetServerStateResponse) GetLastApplied() uint64 {
+	if x != nil {
+		return x.LastApplied
+	}
+	return 0
+}
+
+func (x *GetServerStateResponse) GetLeaderId() string {
+	if x != nil {
+		return x.LeaderId
+	}
+	return ""
+}
+
+func (x *GetServerStateResponse) GetLogEntriesCount() uint64 {
+	if x != nil {
+		return x.LogEntriesCount
+	}
+	return 0
+}
+
 // AddServer RPC request (Section 6)
 type AddServerRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -615,7 +871,7 @@ type AddServerRequest struct {
 
 func (x *AddServerRequest) Reset() {
 	*x = AddServerRequest{}
-	mi := &file_internal_raft_proto_raft_proto_msgTypes[7]
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -627,7 +883,7 @@ func (x *AddServerRequest) String() string {
 func (*AddServerRequest) ProtoMessage() {}
 
 func (x *AddServerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_raft_proto_raft_proto_msgTypes[7]
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -640,7 +896,7 @@ func (x *AddServerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddServerRequest.ProtoReflect.Descriptor instead.
 func (*AddServerRequest) Descriptor() ([]byte, []int) {
-	return file_internal_raft_proto_raft_proto_rawDescGZIP(), []int{7}
+	return file_internal_raft_proto_raft_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *AddServerRequest) GetServerId() string {
@@ -670,7 +926,7 @@ type AddServerResponse struct {
 
 func (x *AddServerResponse) Reset() {
 	*x = AddServerResponse{}
-	mi := &file_internal_raft_proto_raft_proto_msgTypes[8]
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -682,7 +938,7 @@ func (x *AddServerResponse) String() string {
 func (*AddServerResponse) ProtoMessage() {}
 
 func (x *AddServerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_raft_proto_raft_proto_msgTypes[8]
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -695,7 +951,7 @@ func (x *AddServerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddServerResponse.ProtoReflect.Descriptor instead.
 func (*AddServerResponse) Descriptor() ([]byte, []int) {
-	return file_internal_raft_proto_raft_proto_rawDescGZIP(), []int{8}
+	return file_internal_raft_proto_raft_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *AddServerResponse) GetStatus() ConfigChangeStatus {
@@ -723,7 +979,7 @@ type RemoveServerRequest struct {
 
 func (x *RemoveServerRequest) Reset() {
 	*x = RemoveServerRequest{}
-	mi := &file_internal_raft_proto_raft_proto_msgTypes[9]
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -735,7 +991,7 @@ func (x *RemoveServerRequest) String() string {
 func (*RemoveServerRequest) ProtoMessage() {}
 
 func (x *RemoveServerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_raft_proto_raft_proto_msgTypes[9]
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -748,7 +1004,7 @@ func (x *RemoveServerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveServerRequest.ProtoReflect.Descriptor instead.
 func (*RemoveServerRequest) Descriptor() ([]byte, []int) {
-	return file_internal_raft_proto_raft_proto_rawDescGZIP(), []int{9}
+	return file_internal_raft_proto_raft_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *RemoveServerRequest) GetServerId() string {
@@ -771,7 +1027,7 @@ type RemoveServerResponse struct {
 
 func (x *RemoveServerResponse) Reset() {
 	*x = RemoveServerResponse{}
-	mi := &file_internal_raft_proto_raft_proto_msgTypes[10]
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -783,7 +1039,7 @@ func (x *RemoveServerResponse) String() string {
 func (*RemoveServerResponse) ProtoMessage() {}
 
 func (x *RemoveServerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_raft_proto_raft_proto_msgTypes[10]
+	mi := &file_internal_raft_proto_raft_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -796,7 +1052,7 @@ func (x *RemoveServerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveServerResponse.ProtoReflect.Descriptor instead.
 func (*RemoveServerResponse) Descriptor() ([]byte, []int) {
-	return file_internal_raft_proto_raft_proto_rawDescGZIP(), []int{10}
+	return file_internal_raft_proto_raft_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *RemoveServerResponse) GetStatus() ConfigChangeStatus {
@@ -849,7 +1105,23 @@ const file_internal_raft_proto_raft_proto_rawDesc = "" +
 	"\aservers\x18\x01 \x03(\v2\x13.proto.ServerConfigR\aservers\x12\x19\n" +
 	"\bis_joint\x18\x02 \x01(\bR\aisJoint\x124\n" +
 	"\vold_servers\x18\x03 \x03(\v2\x13.proto.ServerConfigR\n" +
-	"oldServers\"V\n" +
+	"oldServers\"0\n" +
+	"\x14ClientCommandRequest\x12\x18\n" +
+	"\acommand\x18\x01 \x01(\fR\acommand\"d\n" +
+	"\x15ClientCommandResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05index\x18\x02 \x01(\x04R\x05index\x12\x1b\n" +
+	"\tleader_id\x18\x03 \x01(\tR\bleaderId\"\x17\n" +
+	"\x15GetServerStateRequest\"\xa3\x02\n" +
+	"\x16GetServerStateResponse\x12\x1b\n" +
+	"\tserver_id\x18\x01 \x01(\tR\bserverId\x12!\n" +
+	"\fcurrent_term\x18\x02 \x01(\x04R\vcurrentTerm\x12\x14\n" +
+	"\x05state\x18\x03 \x01(\tR\x05state\x12$\n" +
+	"\x0elast_log_index\x18\x04 \x01(\x04R\flastLogIndex\x12!\n" +
+	"\fcommit_index\x18\x05 \x01(\x04R\vcommitIndex\x12!\n" +
+	"\flast_applied\x18\x06 \x01(\x04R\vlastApplied\x12\x1b\n" +
+	"\tleader_id\x18\a \x01(\tR\bleaderId\x12*\n" +
+	"\x11log_entries_count\x18\b \x01(\x04R\x0flogEntriesCount\"V\n" +
 	"\x10AddServerRequest\x12\x1b\n" +
 	"\tserver_id\x18\x01 \x01(\tR\bserverId\x12%\n" +
 	"\x0eserver_address\x18\x02 \x01(\tR\rserverAddress\"c\n" +
@@ -869,10 +1141,12 @@ const file_internal_raft_proto_raft_proto_rawDesc = "" +
 	"\n" +
 	"NOT_LEADER\x10\x01\x12\x0f\n" +
 	"\vIN_PROGRESS\x10\x02\x12\v\n" +
-	"\aTIMEOUT\x10\x032\xa8\x02\n" +
+	"\aTIMEOUT\x10\x032\xc3\x03\n" +
 	"\vRaftService\x12D\n" +
 	"\vRequestVote\x12\x19.proto.RequestVoteRequest\x1a\x1a.proto.RequestVoteResponse\x12J\n" +
-	"\rAppendEntries\x12\x1b.proto.AppendEntriesRequest\x1a\x1c.proto.AppendEntriesResponse\x12>\n" +
+	"\rAppendEntries\x12\x1b.proto.AppendEntriesRequest\x1a\x1c.proto.AppendEntriesResponse\x12J\n" +
+	"\rClientCommand\x12\x1b.proto.ClientCommandRequest\x1a\x1c.proto.ClientCommandResponse\x12M\n" +
+	"\x0eGetServerState\x12\x1c.proto.GetServerStateRequest\x1a\x1d.proto.GetServerStateResponse\x12>\n" +
 	"\tAddServer\x12\x17.proto.AddServerRequest\x1a\x18.proto.AddServerResponse\x12G\n" +
 	"\fRemoveServer\x12\x1a.proto.RemoveServerRequest\x1a\x1b.proto.RemoveServerResponseB-Z+aubg-cos-senior-project/internal/raft/protob\x06proto3"
 
@@ -889,21 +1163,25 @@ func file_internal_raft_proto_raft_proto_rawDescGZIP() []byte {
 }
 
 var file_internal_raft_proto_raft_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_internal_raft_proto_raft_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_internal_raft_proto_raft_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_internal_raft_proto_raft_proto_goTypes = []any{
-	(LogEntryType)(0),             // 0: proto.LogEntryType
-	(ConfigChangeStatus)(0),       // 1: proto.ConfigChangeStatus
-	(*RequestVoteRequest)(nil),    // 2: proto.RequestVoteRequest
-	(*RequestVoteResponse)(nil),   // 3: proto.RequestVoteResponse
-	(*AppendEntriesRequest)(nil),  // 4: proto.AppendEntriesRequest
-	(*AppendEntriesResponse)(nil), // 5: proto.AppendEntriesResponse
-	(*LogEntry)(nil),              // 6: proto.LogEntry
-	(*ServerConfig)(nil),          // 7: proto.ServerConfig
-	(*Configuration)(nil),         // 8: proto.Configuration
-	(*AddServerRequest)(nil),      // 9: proto.AddServerRequest
-	(*AddServerResponse)(nil),     // 10: proto.AddServerResponse
-	(*RemoveServerRequest)(nil),   // 11: proto.RemoveServerRequest
-	(*RemoveServerResponse)(nil),  // 12: proto.RemoveServerResponse
+	(LogEntryType)(0),              // 0: proto.LogEntryType
+	(ConfigChangeStatus)(0),        // 1: proto.ConfigChangeStatus
+	(*RequestVoteRequest)(nil),     // 2: proto.RequestVoteRequest
+	(*RequestVoteResponse)(nil),    // 3: proto.RequestVoteResponse
+	(*AppendEntriesRequest)(nil),   // 4: proto.AppendEntriesRequest
+	(*AppendEntriesResponse)(nil),  // 5: proto.AppendEntriesResponse
+	(*LogEntry)(nil),               // 6: proto.LogEntry
+	(*ServerConfig)(nil),           // 7: proto.ServerConfig
+	(*Configuration)(nil),          // 8: proto.Configuration
+	(*ClientCommandRequest)(nil),   // 9: proto.ClientCommandRequest
+	(*ClientCommandResponse)(nil),  // 10: proto.ClientCommandResponse
+	(*GetServerStateRequest)(nil),  // 11: proto.GetServerStateRequest
+	(*GetServerStateResponse)(nil), // 12: proto.GetServerStateResponse
+	(*AddServerRequest)(nil),       // 13: proto.AddServerRequest
+	(*AddServerResponse)(nil),      // 14: proto.AddServerResponse
+	(*RemoveServerRequest)(nil),    // 15: proto.RemoveServerRequest
+	(*RemoveServerResponse)(nil),   // 16: proto.RemoveServerResponse
 }
 var file_internal_raft_proto_raft_proto_depIdxs = []int32{
 	6,  // 0: proto.AppendEntriesRequest.entries:type_name -> proto.LogEntry
@@ -915,14 +1193,18 @@ var file_internal_raft_proto_raft_proto_depIdxs = []int32{
 	1,  // 6: proto.RemoveServerResponse.status:type_name -> proto.ConfigChangeStatus
 	2,  // 7: proto.RaftService.RequestVote:input_type -> proto.RequestVoteRequest
 	4,  // 8: proto.RaftService.AppendEntries:input_type -> proto.AppendEntriesRequest
-	9,  // 9: proto.RaftService.AddServer:input_type -> proto.AddServerRequest
-	11, // 10: proto.RaftService.RemoveServer:input_type -> proto.RemoveServerRequest
-	3,  // 11: proto.RaftService.RequestVote:output_type -> proto.RequestVoteResponse
-	5,  // 12: proto.RaftService.AppendEntries:output_type -> proto.AppendEntriesResponse
-	10, // 13: proto.RaftService.AddServer:output_type -> proto.AddServerResponse
-	12, // 14: proto.RaftService.RemoveServer:output_type -> proto.RemoveServerResponse
-	11, // [11:15] is the sub-list for method output_type
-	7,  // [7:11] is the sub-list for method input_type
+	9,  // 9: proto.RaftService.ClientCommand:input_type -> proto.ClientCommandRequest
+	11, // 10: proto.RaftService.GetServerState:input_type -> proto.GetServerStateRequest
+	13, // 11: proto.RaftService.AddServer:input_type -> proto.AddServerRequest
+	15, // 12: proto.RaftService.RemoveServer:input_type -> proto.RemoveServerRequest
+	3,  // 13: proto.RaftService.RequestVote:output_type -> proto.RequestVoteResponse
+	5,  // 14: proto.RaftService.AppendEntries:output_type -> proto.AppendEntriesResponse
+	10, // 15: proto.RaftService.ClientCommand:output_type -> proto.ClientCommandResponse
+	12, // 16: proto.RaftService.GetServerState:output_type -> proto.GetServerStateResponse
+	14, // 17: proto.RaftService.AddServer:output_type -> proto.AddServerResponse
+	16, // 18: proto.RaftService.RemoveServer:output_type -> proto.RemoveServerResponse
+	13, // [13:19] is the sub-list for method output_type
+	7,  // [7:13] is the sub-list for method input_type
 	7,  // [7:7] is the sub-list for extension type_name
 	7,  // [7:7] is the sub-list for extension extendee
 	0,  // [0:7] is the sub-list for field type_name
@@ -939,7 +1221,7 @@ func file_internal_raft_proto_raft_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_raft_proto_raft_proto_rawDesc), len(file_internal_raft_proto_raft_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   11,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
