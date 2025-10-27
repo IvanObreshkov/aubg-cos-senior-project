@@ -2,8 +2,8 @@ package server
 
 import (
 	"aubg-cos-senior-project/internal/pubsub"
-	"aubg-cos-senior-project/internal/raft"
 	"aubg-cos-senior-project/internal/raft/proto"
+	"aubg-cos-senior-project/internal/raft/state_machine"
 	"aubg-cos-senior-project/internal/raft/storage"
 	"context"
 	"fmt"
@@ -38,11 +38,10 @@ type Server struct {
 	Address ServerAddress
 	// A Log is a collection of proto.LogEntry objects. If State is Leader, this collection is Append Only as per the Leader
 	// Append-Only Property in Figure 3 from the [Raft paper](https://raft.github.io/raft.pdf)
-	// TODO: (Updated on stable storage before responding to RPCs)
 	Log storage.LogStorage
 	// StateMachine is the state machine of the Server as per Section 2 from the
 	// [Raft paper](https://raft.github.io/raft.pdf)
-	StateMachine raft.StateMachine
+	StateMachine state_machine.StateMachine
 	// Transport is the transport layer used for sending RPC messages
 	transport *Transport
 	// A list of ServerIDs of the other Servers in the cluster
@@ -217,17 +216,7 @@ func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest)
 	log.Printf("[SERVER-%s] [TERM-%d] [RPC] Received RequestVote from %s (candidateTerm=%d, lastLogIndex=%d, lastLogTerm=%d)",
 		s.ID, s.currentTerm, req.CandidateId, req.Term, req.LastLogIndex, req.LastLogTerm)
 
-	// Reject self-votes - this happens due to gRPC resolver routing
-	if ServerID(req.CandidateId) == s.ID {
-		log.Printf("[SERVER-%s] [TERM-%d] [RPC] Rejecting self-vote (routing bug)",
-			s.ID, s.currentTerm)
-		return &proto.RequestVoteResponse{
-			Term:        s.currentTerm,
-			VoteGranted: false,
-		}, nil
-	}
-
-	// Reply false if term < currentTerm
+	// Reply false if term < currentTerm  (Section 5.1)
 	if req.Term < s.currentTerm {
 		log.Printf("[SERVER-%s] [TERM-%d] [RPC] Rejecting vote to %s (stale term: %d < %d)",
 			s.ID, s.currentTerm, req.CandidateId, req.Term, s.currentTerm)
@@ -237,12 +226,11 @@ func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest)
 		}, nil
 	}
 
-	// If RPC request contains term T > currentTerm: set currentTerm = T, convert to follower
+	// If RPC request contains term T > currentTerm: set currentTerm = T, convert to follower  (Section 5.1)
 	if req.Term > s.currentTerm {
 		oldTerm := s.currentTerm
 		s.currentTerm = req.Term
-		log.Printf("[SERVER-%s] [TERM-%d→%d] Discovered higher term in RequestVote, updating term and reverting to Follower",
-			s.ID, oldTerm, s.currentTerm)
+		log.Printf("[SERVER-%s] [TERM-%d→%d] Discovered higher term in RequestVote, updating term and reverting to Follower", s.ID, oldTerm, s.currentTerm)
 		s.state = Follower
 		s.votedFor = nil
 		s.votersThisTerm = nil
@@ -251,6 +239,7 @@ func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest)
 		if err := s.Log.SetCurrentTerm(s.currentTerm); err != nil {
 			log.Printf("[SERVER-%s] Error persisting current term: %v", s.ID, err)
 		}
+
 		if err := s.Log.SetVotedFor(nil); err != nil {
 			log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
 		}
@@ -265,6 +254,7 @@ func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest)
 		if timeSinceLastContact < minElectionTimeout {
 			log.Printf("[SERVER-%s] [TERM-%d] [RPC] Rejecting vote to %s (heard from leader %v ago, within minimum election timeout)",
 				s.ID, s.currentTerm, req.CandidateId, timeSinceLastContact)
+
 			return &proto.RequestVoteResponse{
 				Term:        s.currentTerm,
 				VoteGranted: false,
@@ -318,10 +308,8 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 	defer s.mu.Unlock()
 
 	isHeartbeat := len(req.Entries) == 0
-	if isHeartbeat {
-		log.Printf("[SERVER-%s] [TERM-%d] [RPC] Received Heartbeat from Leader %s (leaderTerm=%d, leaderCommit=%d)",
-			s.ID, s.currentTerm, req.LeaderId, req.Term, req.LeaderCommit)
-	} else {
+	// Only log when there's actual data being replicated (not heartbeats)
+	if !isHeartbeat {
 		log.Printf("[SERVER-%s] [TERM-%d] [RPC] Received AppendEntries from Leader %s (leaderTerm=%d, entries=%d, prevLogIndex=%d, prevLogTerm=%d)",
 			s.ID, s.currentTerm, req.LeaderId, req.Term, len(req.Entries), req.PrevLogIndex, req.PrevLogTerm)
 	}
@@ -377,11 +365,19 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 		}
 	}
 
+	// Section 5.2: If a Candidate receives AppendEntries from a leader with term >= currentTerm,
+	// it recognizes the leader as legitimate and reverts to Follower
+	if s.state == Candidate && req.Term == s.currentTerm {
+		log.Printf("[SERVER-%s] [TERM-%d] Candidate received AppendEntries from Leader, reverting to Follower",
+			s.ID, s.currentTerm)
+		s.state = Follower
+		// Clear candidate-specific state
+		s.votersThisTerm = nil
+	}
+
 	// Reset election timeout since we received communication from a leader
 	// Only reset if we have a timer (Leaders don't have election timeout timers)
 	if s.electionTimeoutTimer != nil {
-		log.Printf("[SERVER-%s] [TERM-%d] Resetting election timeout (received communication from Leader %s)",
-			s.ID, s.currentTerm, req.LeaderId)
 		s.electionTimeoutTimer.Reset(s.electionTimeout)
 	}
 
@@ -390,8 +386,6 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 
 	// For heartbeat (empty entries), return success with the current term
 	if len(req.Entries) == 0 {
-		log.Printf("[SERVER-%s] [TERM-%d] [RPC] Accepted heartbeat from Leader %s",
-			s.ID, s.currentTerm, req.LeaderId)
 		return &proto.AppendEntriesResponse{
 			Term:    s.currentTerm,
 			Success: true,
@@ -490,6 +484,99 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 	}, nil
 }
 
+// ClientCommand handles client requests to submit commands to the Raft cluster
+// Section 5.3: "If command received from client: append entry to local log, respond after entry applied to state machine"
+func (s *Server) ClientCommand(ctx context.Context, req *proto.ClientCommandRequest) (*proto.ClientCommandResponse, error) {
+	s.mu.Lock()
+
+	// Check if we're the leader
+	if s.state != Leader {
+		// Not the leader - try to redirect to leader if known
+		leaderID := ""
+		// In a production system, we'd track the leader ID from AppendEntries RPCs
+		// For now, we just return empty leader ID
+
+		log.Printf("[SERVER-%s] [TERM-%d] [RPC] ClientCommand rejected - not the leader",
+			s.ID, s.currentTerm)
+		s.mu.Unlock()
+		return &proto.ClientCommandResponse{
+			Success:  false,
+			Index:    0,
+			LeaderId: leaderID,
+		}, nil
+	}
+
+	// Get the next log index
+	lastIndex, err := s.Log.GetLastIndex()
+	if err != nil {
+		s.mu.Unlock()
+		log.Printf("[SERVER-%s] Error getting last log index: %v", s.ID, err)
+		return &proto.ClientCommandResponse{
+			Success:  false,
+			Index:    0,
+			LeaderId: string(s.ID),
+		}, fmt.Errorf("failed to get last log index: %w", err)
+	}
+
+	nextIndex := lastIndex + 1
+	currentTerm := s.currentTerm
+
+	// Create the new log entry
+	entry := &proto.LogEntry{
+		Index:   nextIndex,
+		Term:    currentTerm,
+		Command: req.Command,
+		Type:    proto.LogEntryType_LOG_COMMAND,
+	}
+
+	// Append to local log
+	if err := s.Log.AppendEntry(entry); err != nil {
+		s.mu.Unlock()
+		log.Printf("[SERVER-%s] Error appending entry to log: %v", s.ID, err)
+		return &proto.ClientCommandResponse{
+			Success:  false,
+			Index:    0,
+			LeaderId: string(s.ID),
+		}, fmt.Errorf("failed to append entry to log: %w", err)
+	}
+
+	log.Printf("[SERVER-%s] [TERM-%d] [CLIENT] Appended command to log at index %d: %s",
+		s.ID, currentTerm, nextIndex, string(req.Command))
+
+	s.mu.Unlock()
+
+	// Replicate to followers immediately
+	go s.replicateToFollowers()
+
+	// For simplicity in this demo, we return success immediately
+	// In a production system, you'd wait for the entry to be committed before returning
+	return &proto.ClientCommandResponse{
+		Success:  true,
+		Index:    nextIndex,
+		LeaderId: string(s.ID),
+	}, nil
+}
+
+// GetServerState handles requests to query the current state of the server
+// This is useful for debugging and demo purposes
+func (s *Server) GetServerState(ctx context.Context, req *proto.GetServerStateRequest) (*proto.GetServerStateResponse, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	lastIndex, _ := s.Log.GetLastIndex()
+
+	return &proto.GetServerStateResponse{
+		ServerId:        string(s.ID),
+		CurrentTerm:     s.currentTerm,
+		State:           s.state.String(),
+		LastLogIndex:    lastIndex,
+		CommitIndex:     s.commitIndex,
+		LastApplied:     s.lastApplied,
+		LeaderId:        "", // We don't track leader ID in follower state
+		LogEntriesCount: lastIndex,
+	}, nil
+}
+
 // BeginElection is called when a server does not receive HeartBeat messages from a Leader node over an ElectionTimeout
 // period, as per Section 5.2 from the [Raft paper](https://raft.github.io/raft.pdf)
 func (s *Server) BeginElection() {
@@ -512,6 +599,7 @@ func (s *Server) BeginElection() {
 	}
 
 	// Detect split vote: if we're still a Candidate, the previous election failed
+	oldState := s.state
 	if s.state == Candidate {
 		log.Printf("[SERVER-%s] [TERM-%d] ⚠️  SPLIT VOTE detected - previous election failed, starting new election",
 			s.ID, s.currentTerm)
@@ -527,7 +615,7 @@ func (s *Server) BeginElection() {
 	// 2. Transition to a Candidate state
 	s.state = Candidate
 	log.Printf("[SERVER-%v] [TERM-%d→%d] Transitioning %v → Candidate, starting election",
-		s.ID, oldTerm, s.currentTerm, Follower)
+		s.ID, oldTerm, s.currentTerm, oldState)
 
 	// 3. The server Votes for itself exactly once
 	s.votedFor = &s.ID
@@ -545,16 +633,11 @@ func (s *Server) BeginElection() {
 		log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
 	}
 
-	log.Printf("[SERVER-%s] [TERM-%d] DEBUG: Finished persisting state", s.ID, s.currentTerm)
-
 	// Reset election timeout with a NEW random value to prevent split votes
 	// Section 5.2: "Raft uses randomized election timeouts to ensure that split votes are rare
 	// and that they are resolved quickly"
-	oldTimeout := s.electionTimeout
 	s.electionTimeout = getElectionTimeoutMs()
 	s.electionTimeoutTimer.Reset(s.electionTimeout)
-	log.Printf("[SERVER-%s] [TERM-%d] Reset election timeout %v→%v (prevents synchronized elections)",
-		s.ID, s.currentTerm, oldTimeout, s.electionTimeout)
 
 	// Snapshot the term and peers for outbound RPCs to avoid race conditions. (In case any other thread changes these
 	// after we have released the lock)
@@ -1103,8 +1186,16 @@ func (s *Server) updateCommitIndex() {
 			if entry.Term == s.currentTerm {
 				oldCommitIndex := s.commitIndex
 				s.commitIndex = newCommitIndex
-				log.Printf("[SERVER-%s] [TERM-%d] Advanced commitIndex from %d to %d",
-					s.ID, s.currentTerm, oldCommitIndex, newCommitIndex)
+
+				// Calculate how many new entries were committed
+				numNewCommits := newCommitIndex - oldCommitIndex
+				if numNewCommits == 1 {
+					log.Printf("[SERVER-%s] [TERM-%d] ✓ Entry %d is now COMMITTED (majority replicated)",
+						s.ID, s.currentTerm, newCommitIndex)
+				} else {
+					log.Printf("[SERVER-%s] [TERM-%d] ✓ Entries %d-%d are now COMMITTED (majority replicated)",
+						s.ID, s.currentTerm, oldCommitIndex+1, newCommitIndex)
+				}
 
 				// Apply newly committed entries to the state machine
 				go s.applyCommittedEntries()
@@ -1324,8 +1415,14 @@ func (s *Server) handleAppendEntriesResponse(peerID ServerID, req *proto.AppendE
 			s.nextIndex[peerID] = lastEntryIndex + 1
 			s.matchIndex[peerID] = lastEntryIndex
 
-			log.Printf("[SERVER-%s] [TERM-%d] Updated peer %s: nextIndex=%d, matchIndex=%d",
-				s.ID, s.currentTerm, peerID, s.nextIndex[peerID], s.matchIndex[peerID])
+			// Shorten peer ID for readability
+			shortPeerID := string(peerID)
+			if len(shortPeerID) > 12 {
+				shortPeerID = shortPeerID[:12] + "..."
+			}
+
+			log.Printf("[SERVER-%s] [TERM-%d] ✓ Follower %s acknowledged replication up to index %d",
+				s.ID, s.currentTerm, shortPeerID, lastEntryIndex)
 
 			// Check if we can advance commitIndex
 			s.updateCommitIndex()
@@ -1342,9 +1439,6 @@ func (s *Server) handleAppendEntriesResponse(peerID ServerID, req *proto.AppendE
 		}
 	}
 }
-
-// updateCommitIndex checks if we can advance the commitIndex based on matchIndex values
-// Section 5.3: "If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
 
 // StartServer starts a new Raft node on the given port
 func (s *Server) StartServer(port int) error {
@@ -1430,6 +1524,13 @@ func (s *Server) GracefulShutdown() {
 	s.transport.CloseAllClients()
 	log.Printf("[SERVER-%s] Closed all transport connections", serverID)
 
+	// Close the database connection
+	if err := s.Log.Close(); err != nil {
+		log.Printf("[SERVER-%s] Error closing database: %v", serverID, err)
+	} else {
+		log.Printf("[SERVER-%s] Closed database connection", serverID)
+	}
+
 	// Send a signal to all listeners that the server is shutting down
 	pubsub.Publish(s.pubSub, pubsub.NewEvent(ServerShutDown, struct{}{}))
 	log.Printf("[SERVER-%s] Shutdown complete", serverID)
@@ -1439,6 +1540,12 @@ func (s *Server) ForceShutdown() {
 	log.Printf("Force shutting down server %s", s.ID)
 	s.transport.CloseAllClients()
 	s.grpcServer.Stop()
+
+	// Close the database connection
+	if err := s.Log.Close(); err != nil {
+		log.Printf("[SERVER-%s] Error closing database during force shutdown: %v", s.ID, err)
+	}
+
 	// Send a signal to all listeners that the server is shutting down
 	pubsub.Publish(s.pubSub, pubsub.NewEvent(ServerShutDown, struct{}{}))
 }
@@ -1495,12 +1602,13 @@ func NewServer(currentTerm uint64, addr ServerAddress, peers []ServerID, pubSub 
 			votedFor:        votedFor,
 			electionTimeout: electionTimeout,
 		},
-		ID:        serverID,
-		Address:   addr,
-		Log:       store,
-		transport: NewTransport(peers),
-		peers:     peers,
-		pubSub:    pubSub,
+		ID:           serverID,
+		Address:      addr,
+		Log:          store,
+		StateMachine: state_machine.NewKVStateMachine(string(serverID)),
+		transport:    NewTransport(peers),
+		peers:        peers,
+		pubSub:       pubSub,
 	}
 
 	// Initialize configuration (Section 6)

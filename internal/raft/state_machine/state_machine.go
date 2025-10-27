@@ -1,4 +1,4 @@
-package raft
+package state_machine
 
 import "aubg-cos-senior-project/internal/raft/proto"
 

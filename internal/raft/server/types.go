@@ -20,6 +20,20 @@ const (
 	Candidate
 )
 
+// String returns the string representation of the State
+func (s State) String() string {
+	switch s {
+	case Leader:
+		return "Leader"
+	case Follower:
+		return "Follower"
+	case Candidate:
+		return "Candidate"
+	default:
+		return "Unknown"
+	}
+}
+
 const (
 	// ServerShutDown event is sent when the server is shutting down. The payload for this event is an empty struct.
 	ServerShutDown pubsub.EventType = iota
