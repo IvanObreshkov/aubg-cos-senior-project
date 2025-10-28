@@ -227,8 +227,32 @@ func (s *Server) AddServer(ctx context.Context, req *proto.AddServerRequest) (*p
 	log.Printf("[SERVER-%s] [TERM-%d] Appended C_old,new configuration at index %d",
 		s.ID, s.currentTerm, entry.Index)
 
-	// TODO: Wait for the entry to be committed and then append C_new
-	// For now, return success
+	// Section 6: Start replicating to the new server immediately
+	// Initialize leader state for the new server (if we're the leader)
+	if s.state == Leader {
+		newServerID := ServerID(req.ServerId)
+
+		// Add the new server to peers list for replication
+		s.peers = append(s.peers, newServerID)
+
+		// Initialize nextIndex and matchIndex for the new server
+		lastLogIndex, _ := s.getLastLogIndexAndTerm()
+		s.nextIndex[newServerID] = lastLogIndex + 1
+		s.matchIndex[newServerID] = 0
+
+		// Establish gRPC connection to the new server
+		newServerAddr := ServerAddress(req.ServerAddress)
+		if err := s.transport.AddPeer(newServerID, newServerAddr); err != nil {
+			log.Printf("[SERVER-%s] Warning: Failed to add peer %s at %s: %v", s.ID, newServerID, newServerAddr, err)
+		}
+
+		log.Printf("[SERVER-%s] [TERM-%d] Started replicating to new server %s (nextIndex=%d)",
+			s.ID, s.currentTerm, newServerID, lastLogIndex+1)
+	}
+
+	// Replicate the configuration change immediately
+	go s.ReplicateToFollowers()
+
 	return &proto.AddServerResponse{
 		Status: proto.ConfigChangeStatus_OK,
 	}, nil
@@ -321,8 +345,27 @@ func (s *Server) RemoveServer(ctx context.Context, req *proto.RemoveServerReques
 	log.Printf("[SERVER-%s] [TERM-%d] Appended C_old,new configuration at index %d",
 		s.ID, s.currentTerm, entry.Index)
 
-	// TODO: Wait for the entry to be committed and then append C_new
-	// For now, return success
+	// Section 6: Update peers list to reflect the joint configuration
+	// Note: We don't remove the connection yet - that happens when C_new is committed
+	// But we update the peers list so replication logic knows about the change
+	if s.state == Leader {
+		// Update peers list to reflect new configuration
+		// During joint consensus, keep replicating to all servers in both configs
+		newPeers := make([]ServerID, 0)
+		for _, server := range jointConfig.Servers {
+			serverID := ServerID(server.Id)
+			if serverID != s.ID {
+				newPeers = append(newPeers, serverID)
+			}
+		}
+
+		// Keep the old peers list during joint consensus to maintain replication
+		// The actual removal happens when C_new is committed
+	}
+
+	// Replicate the configuration change immediately
+	go s.ReplicateToFollowers()
+
 	return &proto.RemoveServerResponse{
 		Status: proto.ConfigChangeStatus_OK,
 	}, nil
@@ -350,6 +393,36 @@ func (s *Server) applyConfigurationEntry(entry *proto.LogEntry) error {
 		// This is C_old,new - we're in joint consensus mode
 		s.latestConfig = config
 
+		// Check if we're being removed in this joint configuration
+		// If we're not in the new configuration, we should stop participating immediately
+		if !isServerInConfig(s.ID, config) {
+			log.Printf("[SERVER-%s] Server NOT in C_old,new configuration - will be removed", s.ID)
+
+			// Mark that we've been removed from the cluster
+			s.removedFromCluster = true
+
+			// Clear our peers list since we're being removed
+			s.peers = nil
+
+			// Stop election timer - we should not participate anymore
+			if s.electionTimeoutTimer != nil {
+				s.electionTimeoutTimer.Stop()
+				s.electionTimeoutTimer = nil
+			}
+
+			if s.state == Leader {
+				// Stop heartbeats
+				if s.heartbeatTimer != nil {
+					s.heartbeatTimer.Stop()
+				}
+			}
+
+			s.state = Follower
+			s.votedFor = nil
+
+			log.Printf("[SERVER-%s] Stopped all activity - server is being removed from cluster", s.ID)
+		}
+
 		// Once C_old,new is committed, leader should append C_new
 		// Section 6: "Once C_old,new has been committed, C_new can be committed without C_old"
 		if s.state == Leader && entry.Index == s.configChangeIndex {
@@ -366,18 +439,60 @@ func (s *Server) applyConfigurationEntry(entry *proto.LogEntry) error {
 		log.Printf("[SERVER-%s] [TERM-%d] Configuration change complete - now have %d servers",
 			s.ID, s.currentTerm, len(config.Servers))
 
-		// Update peers list
+		// Build old and new peer sets for comparison
+		oldPeers := make(map[ServerID]bool)
+		for _, peerID := range s.peers {
+			oldPeers[peerID] = true
+		}
+
+		// Update peers list and establish connections for new peers
 		newPeers := make([]ServerID, 0, len(config.Servers)-1)
 		for _, server := range config.Servers {
-			if ServerID(server.Id) != s.ID {
-				newPeers = append(newPeers, ServerID(server.Id))
+			serverID := ServerID(server.Id)
+			if serverID != s.ID {
+				newPeers = append(newPeers, serverID)
+
+				// If this is a new peer, establish a gRPC connection
+				if !oldPeers[serverID] {
+					serverAddr := ServerAddress(server.Address)
+					if err := s.transport.AddPeer(serverID, serverAddr); err != nil {
+						log.Printf("[SERVER-%s] Warning: Failed to add peer %s at %s: %v", s.ID, serverID, serverAddr, err)
+					} else {
+						log.Printf("[SERVER-%s] Added connection to new peer %s", s.ID, serverID)
+					}
+				}
 			}
 		}
 		s.peers = newPeers
 
+		log.Printf("[SERVER-%s] Updated peers list to %d peers", s.ID, len(s.peers))
+
+		// Remove connections for peers that are no longer in the cluster
+		newPeerSet := make(map[ServerID]bool)
+		for _, peerID := range newPeers {
+			newPeerSet[peerID] = true
+		}
+		for peerID := range oldPeers {
+			if !newPeerSet[peerID] {
+				s.transport.RemovePeer(peerID)
+				// Clean up leader state for removed peers
+				if s.state == Leader {
+					delete(s.nextIndex, peerID)
+					delete(s.matchIndex, peerID)
+				}
+			}
+		}
+
 		// Check if we're being removed
 		if !isServerInConfig(s.ID, config) {
 			log.Printf("[SERVER-%s] Server removed from configuration, stepping down", s.ID)
+
+			// Mark that we've been removed from the cluster
+			s.removedFromCluster = true
+
+			// Clear our peers list since we're no longer part of the cluster
+			s.peers = nil
+
 			if s.state == Leader {
 				// Stop heartbeats
 				if s.heartbeatTimer != nil {
@@ -386,11 +501,14 @@ func (s *Server) applyConfigurationEntry(entry *proto.LogEntry) error {
 			}
 			s.state = Follower
 			s.votedFor = nil
-			// Reset election timeout
+
+			// Stop election timer - we're not part of the cluster anymore
 			if s.electionTimeoutTimer != nil {
-				s.electionTimeoutTimer.Reset(s.electionTimeout)
+				s.electionTimeoutTimer.Stop()
+				s.electionTimeoutTimer = nil
 			}
-			// TODO: Should probably shut down gracefully
+
+			log.Printf("[SERVER-%s] Stopped all timers - server is now isolated", s.ID)
 		}
 	}
 
@@ -432,4 +550,7 @@ func (s *Server) appendCnew(jointConfig *proto.Configuration) {
 
 	log.Printf("[SERVER-%s] [TERM-%d] Appended C_new configuration at index %d",
 		s.ID, s.currentTerm, entry.Index)
+
+	// Replicate C_new to followers immediately (don't wait for heartbeat)
+	go s.ReplicateToFollowers()
 }

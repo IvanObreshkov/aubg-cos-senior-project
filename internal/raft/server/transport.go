@@ -68,7 +68,8 @@ func (t *Transport) getClientConn(peerID ServerID) (*grpc.ClientConn, error) {
 func (t *Transport) RequestVote(ctx context.Context, peerID ServerID, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
 	conn, err := t.getClientConn(peerID)
 	if err != nil {
-		return nil, err
+		// Peer no longer in cluster - this is expected during membership changes
+		return nil, fmt.Errorf("peer %s not found (likely removed from cluster): %w", peerID, err)
 	}
 
 	// Create the RaftServiceClient on the fly. This is just a wrapper around the connection, and we need it as it
@@ -117,7 +118,9 @@ func (t *Transport) RequestVote(ctx context.Context, peerID ServerID, req *proto
 func (t *Transport) AppendEntries(ctx context.Context, peerID ServerID, req *proto.AppendEntriesRequest) (*proto.AppendEntriesResponse, error) {
 	conn, err := t.getClientConn(peerID)
 	if err != nil {
-		return nil, err
+		// Peer no longer in cluster - this is expected during membership changes
+		// Don't retry, just return immediately
+		return nil, fmt.Errorf("peer %s not found (likely removed from cluster): %w", peerID, err)
 	}
 
 	client := proto.NewRaftServiceClient(conn)
@@ -230,6 +233,42 @@ func (t *Transport) CloseAllClients() {
 		return true
 	})
 	log.Println("All gRPC client connections closed.")
+}
+
+// AddPeer adds a gRPC connection for a new peer that joined the cluster
+func (t *Transport) AddPeer(peerID ServerID, peerAddr ServerAddress) error {
+	// Check if connection already exists
+	if _, err := t.getClientConn(peerID); err == nil {
+		// Connection already exists, nothing to do
+		return nil
+	}
+
+	// Register the peer's address with the DNS resolver first
+	RegisterResolverPeer(peerID, peerAddr)
+
+	// Create new connection
+	target := fmt.Sprintf("%s:///%s", raftScheme, peerID) // "raft:///UUID"
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("failed to establish gRPC connection to peer %s: %w", peerID, err)
+	}
+
+	t.clientsConnPool.Store(peerID, conn)
+	log.Printf("[TRANSPORT] Added gRPC connection for new peer %s at %s", peerID, peerAddr)
+	return nil
+}
+
+// RemovePeer closes and removes the gRPC connection for a peer that left the cluster
+func (t *Transport) RemovePeer(peerID ServerID) {
+	if value, ok := t.clientsConnPool.LoadAndDelete(peerID); ok {
+		if conn, ok := value.(*grpc.ClientConn); ok {
+			if err := conn.Close(); err != nil {
+				log.Printf("[TRANSPORT] Failed to close connection to removed peer %s: %v", peerID, err)
+			} else {
+				log.Printf("[TRANSPORT] Closed connection to removed peer: %s", peerID)
+			}
+		}
+	}
 }
 
 func NewTransport(peerIDs []ServerID) *Transport {

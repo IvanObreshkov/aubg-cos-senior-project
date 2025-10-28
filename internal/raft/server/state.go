@@ -75,6 +75,10 @@ type serverState struct {
 	configChangeInProgress bool
 	// configChangeIndex is the log index of the configuration change being applied
 	configChangeIndex uint64
+
+	// removedFromCluster tracks whether this server has been removed from the cluster configuration
+	// Once set to true, the server should not participate in elections or consensus anymore
+	removedFromCluster bool
 }
 
 func (s *serverState) getState() State {
@@ -236,4 +240,18 @@ func (s *serverState) setConfigChangeIndex(index uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.configChangeIndex = index
+}
+
+// isRemovedFromCluster returns whether this server has been removed from the cluster
+func (s *serverState) isRemovedFromCluster() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.removedFromCluster
+}
+
+// setRemovedFromCluster marks this server as removed from the cluster
+func (s *serverState) setRemovedFromCluster(removed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.removedFromCluster = removed
 }

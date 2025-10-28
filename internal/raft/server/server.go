@@ -402,7 +402,7 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 	// If this is a newly joined server that hasn't started its election timer yet, start it now
 	if s.electionTimeoutTimer != nil {
 		s.electionTimeoutTimer.Reset(s.electionTimeout)
-	} else if s.state == Follower {
+	} else if s.state == Follower && !s.removedFromCluster {
 		// This is a new server joining the cluster - start its election timer now.
 		// We do this AFTER receiving the first AppendEntries to avoid split-brain scenarios
 		// and ensure the new server is properly synchronized before participating in elections.
@@ -432,6 +432,9 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 		//
 		// This approach implements Raft's safe server addition protocol (Section 6 of the paper),
 		// where new servers must catch up before being able to fully participate in the cluster.
+		//
+		// IMPORTANT: Do not start election timer if this server has been removed from the cluster.
+		// A removed server (removedFromCluster=true) should never participate in elections again.
 		log.Printf("[SERVER-%s] [TERM-%d] Starting election timer after receiving first AppendEntries from leader",
 			s.ID, s.currentTerm)
 		s.mu.Unlock()
@@ -685,6 +688,14 @@ func (s *Server) GetServerState(ctx context.Context, req *proto.GetServerStateRe
 func (s *Server) BeginElection() {
 	// We put a Lock as all updates must be atomic, to avoid race conditions
 	s.mu.Lock()
+
+	// Check if this server has been removed from the cluster
+	// A removed server should never start elections
+	if s.removedFromCluster {
+		log.Printf("[SERVER-%s] Ignoring election timeout - server has been removed from cluster", s.ID)
+		s.mu.Unlock()
+		return
+	}
 
 	// Check if server has started yet (timer is initialized in StartServer)
 	if s.electionTimeoutTimer == nil {
