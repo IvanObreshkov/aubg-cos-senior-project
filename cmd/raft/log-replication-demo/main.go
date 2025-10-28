@@ -60,7 +60,14 @@ func main() {
 
 	fmt.Println()
 	fmt.Println("⏳ Waiting for replication to complete...")
+	// Give the cluster a moment to propagate the final commit
 	time.Sleep(2 * time.Second)
+
+	// Wait for all servers to have consistent state (same commitIndex and lastApplied)
+	// with a timeout to prevent infinite waiting
+	if !waitForConsistentState(servers, 10*time.Second) {
+		fmt.Println("⚠️  Warning: Servers did not reach consistent state within timeout")
+	}
 
 	fmt.Println()
 	fmt.Println("========================================")
@@ -136,6 +143,95 @@ func findLeader(servers []string) string {
 		}
 	}
 	return ""
+}
+
+// waitForConsistentState polls all servers until they have consistent commitIndex and lastApplied
+// Returns true if consistency is achieved, false if timeout occurs
+func waitForConsistentState(servers []string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	pollInterval := 100 * time.Millisecond // Poll every 100ms
+	attemptCount := 0
+
+	for time.Now().Before(deadline) {
+		attemptCount++
+		states := make([]*proto.GetServerStateResponse, 0, len(servers))
+		allReachable := true
+
+		// Query all servers
+		for _, addr := range servers {
+			state := getServerState(addr)
+			if state == nil {
+				allReachable = false
+				break
+			}
+			states = append(states, state)
+		}
+
+		// If we couldn't reach all servers, try again
+		if !allReachable {
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// Check if all servers have the same log entries and have applied them
+		// All servers should eventually converge to the same commitIndex and lastApplied
+		if len(states) > 0 {
+			// All servers must have same log length, commitIndex, and lastApplied
+			firstLastLogIndex := states[0].LastLogIndex
+			firstCommitIndex := states[0].CommitIndex
+			firstLastApplied := states[0].LastApplied
+
+			allConsistent := true
+			for _, state := range states {
+				// All servers must have replicated all log entries
+				if state.LastLogIndex != firstLastLogIndex {
+					allConsistent = false
+					break
+				}
+				// All servers must have same commitIndex and lastApplied
+				if state.CommitIndex != firstCommitIndex || state.LastApplied != firstLastApplied {
+					allConsistent = false
+					break
+				}
+			}
+
+			if allConsistent {
+				fmt.Printf("✓ All servers consistent after %d polls (%.1fs)\n",
+					attemptCount, time.Since(deadline.Add(-timeout)).Seconds())
+				return true
+			}
+		}
+
+		// Show progress every 500ms
+		if attemptCount%5 == 0 {
+			fmt.Printf("  Polling... (attempt %d)\n", attemptCount)
+		}
+
+		time.Sleep(pollInterval)
+	}
+
+	return false
+}
+
+// getServerState queries a server and returns its state, or nil if unreachable
+func getServerState(addr string) *proto.GetServerStateResponse {
+	conn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+
+	client := proto.NewRaftServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	resp, err := client.GetServerState(ctx, &proto.GetServerStateRequest{})
+	cancel()
+
+	if err != nil {
+		return nil
+	}
+
+	return resp
 }
 
 func queryServerState(addr string) {

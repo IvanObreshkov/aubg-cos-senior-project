@@ -10,6 +10,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -245,6 +246,29 @@ func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest)
 		}
 	}
 
+	// Leaders never grant votes to other candidates in the same term
+	// A leader has already won the election for this term, so it should not vote for anyone else
+	if s.state == Leader && s.currentTerm == req.Term {
+		log.Printf("[SERVER-%s] [TERM-%d] [RPC] Rejecting vote to %s (already Leader in this term)",
+			s.ID, s.currentTerm, req.CandidateId)
+		return &proto.RequestVoteResponse{
+			Term:        s.currentTerm,
+			VoteGranted: false,
+		}, nil
+	}
+
+	// Candidates never grant votes to other candidates in the same term
+	// A candidate has already voted for itself (Section 5.2: "Each server will vote for at most one candidate in a given term")
+	// This prevents the split-brain scenario where two candidates vote for each other
+	if s.state == Candidate && s.currentTerm == req.Term {
+		log.Printf("[SERVER-%s] [TERM-%d] [RPC] Rejecting vote to %s (already Candidate in this term, voted for self)",
+			s.ID, s.currentTerm, req.CandidateId)
+		return &proto.RequestVoteResponse{
+			Term:        s.currentTerm,
+			VoteGranted: false,
+		}, nil
+	}
+
 	// Section 6 optimization: "servers disregard RequestVote RPCs when they believe a current leader exists"
 	// If we've heard from a valid leader recently (within minimum election timeout), reject the vote.
 	// This prevents disruptions from servers that have been partitioned and are now rejoining.
@@ -307,11 +331,10 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	isHeartbeat := len(req.Entries) == 0
-	// Only log when there's actual data being replicated (not heartbeats)
-	if !isHeartbeat {
-		log.Printf("[SERVER-%s] [TERM-%d] [RPC] Received AppendEntries from Leader %s (leaderTerm=%d, entries=%d, prevLogIndex=%d, prevLogTerm=%d)",
-			s.ID, s.currentTerm, req.LeaderId, req.Term, len(req.Entries), req.PrevLogIndex, req.PrevLogTerm)
+	// Only log AppendEntries that contain actual entries (not empty heartbeats)
+	if len(req.Entries) > 0 {
+		log.Printf("[SERVER-%s] [TERM-%d] [RPC] Received AppendEntries from Leader %s (leaderTerm=%d, entries=%d, prevLogIndex=%d, prevLogTerm=%d, leaderCommit=%d)",
+			s.ID, s.currentTerm, req.LeaderId, req.Term, len(req.Entries), req.PrevLogIndex, req.PrevLogTerm, req.LeaderCommit)
 	}
 
 	// If a server receives a request with a stale term number, it rejects the request. (Section 5.1)
@@ -376,16 +399,82 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 	}
 
 	// Reset election timeout since we received communication from a leader
-	// Only reset if we have a timer (Leaders don't have election timeout timers)
+	// If this is a newly joined server that hasn't started its election timer yet, start it now
 	if s.electionTimeoutTimer != nil {
 		s.electionTimeoutTimer.Reset(s.electionTimeout)
+	} else if s.state == Follower {
+		// This is a new server joining the cluster - start its election timer now.
+		// We do this AFTER receiving the first AppendEntries to avoid split-brain scenarios
+		// and ensure the new server is properly synchronized before participating in elections.
+		//
+		// Why wait for the first AppendEntries?
+		// =====================================
+		// 1. Discovery & Synchronization:
+		//    - Learn the current term and who the leader is
+		//    - Begin catching up on the log (receiving missing entries)
+		//    - Understand the current cluster state before making decisions
+		//
+		// 2. Avoid Premature Elections:
+		//    If we started the election timer immediately upon server startup, the new
+		//    server could time out and start an election before receiving any communication
+		//    from the leader. This would:
+		//    - Disrupt the stable leader with unnecessary elections
+		//    - Cause split votes since the new server's log is behind
+		//    - Create a split-brain scenario where the new server competes for leadership
+		//      while being completely out of sync with the cluster
+		//
+		// 3. Safe Integration:
+		//    By waiting for the first AppendEntries, we ensure:
+		//    - The new server acknowledges the current leader's authority
+		//    - The server begins log replication and catches up on committed entries
+		//    - The server is ready to participate in consensus with up-to-date information
+		//    - The cluster remains stable during the membership change
+		//
+		// This approach implements Raft's safe server addition protocol (Section 6 of the paper),
+		// where new servers must catch up before being able to fully participate in the cluster.
+		log.Printf("[SERVER-%s] [TERM-%d] Starting election timer after receiving first AppendEntries from leader",
+			s.ID, s.currentTerm)
+		s.mu.Unlock()
+		s.StartElectionTimer()
+		s.mu.Lock()
 	}
 
 	// Update last leader contact time for Section 6 optimization
 	s.lastLeaderContact = time.Now()
 
-	// For heartbeat (empty entries), return success with the current term
+	// Handle commit index updates even for heartbeats (empty entries)
+	// This is critical for propagating commit index to followers
+	// Section 5.3: "If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)"
 	if len(req.Entries) == 0 {
+		// This is a heartbeat - still need to update commitIndex if leaderCommit is higher
+		if req.LeaderCommit > s.commitIndex {
+			lastLogIndex, err := s.Log.GetLastIndex()
+			if err != nil {
+				log.Printf("[SERVER-%s] Error getting last log index: %v", s.ID, err)
+			} else {
+				oldCommitIndex := s.commitIndex
+				// Set commitIndex to min(leaderCommit, lastLogIndex)
+				if req.LeaderCommit < lastLogIndex {
+					s.commitIndex = req.LeaderCommit
+				} else {
+					s.commitIndex = lastLogIndex
+				}
+
+				// Only log if commitIndex actually changed
+				if s.commitIndex != oldCommitIndex {
+					log.Printf("[SERVER-%s] [TERM-%d] Updated commitIndex from %d to %d via heartbeat (lastLogIndex=%d, leaderCommit=%d)",
+						s.ID, s.currentTerm, oldCommitIndex, s.commitIndex, lastLogIndex, req.LeaderCommit)
+
+					// Release lock before applying entries to avoid blocking
+					s.mu.Unlock()
+					// Apply newly committed entries to state machine
+					s.applyCommittedEntries()
+					// Re-acquire lock for the defer unlock
+					s.mu.Lock()
+				}
+			}
+		}
+
 		return &proto.AppendEntriesResponse{
 			Term:    s.currentTerm,
 			Success: true,
@@ -462,17 +551,31 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 
 	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if req.LeaderCommit > s.commitIndex {
-		lastNewIndex := req.Entries[len(req.Entries)-1].Index
-		if req.LeaderCommit < lastNewIndex {
-			s.commitIndex = req.LeaderCommit
+		// Find the index of the last entry in our log
+		// This could be from the new entries we just appended, or from entries we already had
+		lastLogIndex, err := s.Log.GetLastIndex()
+		if err != nil {
+			log.Printf("[SERVER-%s] Error getting last log index: %v", s.ID, err)
 		} else {
-			s.commitIndex = lastNewIndex
-		}
-		log.Printf("[SERVER-%s] [TERM-%d] Updated commitIndex to %d",
-			s.ID, s.currentTerm, s.commitIndex)
+			oldCommitIndex := s.commitIndex
+			// Set commitIndex to min(leaderCommit, lastLogIndex)
+			if req.LeaderCommit < lastLogIndex {
+				s.commitIndex = req.LeaderCommit
+			} else {
+				s.commitIndex = lastLogIndex
+			}
+			log.Printf("[SERVER-%s] [TERM-%d] Updated commitIndex from %d to %d (lastLogIndex=%d, leaderCommit=%d)",
+				s.ID, s.currentTerm, oldCommitIndex, s.commitIndex, lastLogIndex, req.LeaderCommit)
 
-		// Apply newly committed entries to state machine
-		go s.applyCommittedEntries()
+			// Release lock before applying entries to avoid blocking
+			// applyCommittedEntries() needs to acquire the lock itself
+			s.mu.Unlock()
+			// Apply newly committed entries to state machine
+			// This must be called synchronously to ensure entries are applied before we return
+			s.applyCommittedEntries()
+			// Re-acquire lock for the defer unlock
+			s.mu.Lock()
+		}
 	}
 
 	log.Printf("[SERVER-%s] [TERM-%d] [RPC] Successfully replicated %d entries from Leader %s",
@@ -662,15 +765,23 @@ func (s *Server) BeginElection() {
 		s.ID, termForReq, len(peers), lastLogIndex, lastLogTerm)
 
 	for _, peer := range peers {
+		// Defensive check: never send RequestVote to ourselves
+		// This prevents the bug where a server votes for itself twice (once locally, once via RPC)
+		if peer == s.ID {
+			log.Printf("[SERVER-%s] [TERM-%d] WARNING: Self (%s) found in peers list, skipping RequestVote to self",
+				s.ID, termForReq, peer)
+			continue
+		}
+
 		// We do this in order to have parallelism but also waiting for a resp is a blocking operation, so we do this
 		// in another thread.
-		go func() {
+		go func(peerID ServerID) {
 			reqCtx := context.Background()
 			SetServerCurrTerm(reqCtx, termForReq)
 			SetServerID(reqCtx, s.ID)
 			SetServerAddr(reqCtx, s.Address)
 
-			resp, err := s.transport.RequestVote(reqCtx, peer, req)
+			resp, err := s.transport.RequestVote(reqCtx, peerID, req)
 			if err != nil {
 				// Transport layer already logged the failure, just return
 				return
@@ -696,7 +807,7 @@ func (s *Server) BeginElection() {
 					s.matchIndex = nil
 
 					log.Printf("[SERVER-%s] [TERM-%d→%d] Discovered higher term in RequestVote response from %s, reverting %s → Follower",
-						s.ID, oldTerm, s.currentTerm, peer, oldState)
+						s.ID, oldTerm, s.currentTerm, peerID, oldState)
 
 					// Persist term change
 					if err := s.Log.SetCurrentTerm(s.currentTerm); err != nil {
@@ -722,23 +833,23 @@ func (s *Server) BeginElection() {
 			// if resp.Term < termForReq: it's a stale response, so ignore it
 			if resp.Term < termForReq {
 				log.Printf("[SERVER-%s] [TERM-%d] Ignoring stale RequestVote response from %s (responseTerm=%d < currentTerm=%d)",
-					s.ID, termForReq, peer, resp.Term, termForReq)
+					s.ID, termForReq, peerID, resp.Term, termForReq)
 				return
 			}
 
 			// Count granted votes only for THIS election's term snapshot
 			if resp.VoteGranted && resp.Term == termForReq {
 				log.Printf("[SERVER-%s] [TERM-%d] Received vote from %s",
-					s.ID, termForReq, peer)
+					s.ID, termForReq, peerID)
 				pubsub.Publish(s.pubSub, pubsub.NewEvent(VoteGranted, VoteGrantedPayload{
-					From: peer,
+					From: peerID,
 					Term: termForReq,
 				}))
 			} else if !resp.VoteGranted {
 				log.Printf("[SERVER-%s] [TERM-%d] Vote denied by %s",
-					s.ID, termForReq, peer)
+					s.ID, termForReq, peerID)
 			}
-		}()
+		}(peer)
 	}
 }
 
@@ -924,22 +1035,52 @@ func (s *Server) SendHeartbeats() {
 	term := s.currentTerm
 	peerIDs := append([]ServerID(nil), s.peers...)
 	commitIndex := s.commitIndex
+	// Need to capture nextIndex for each peer to set proper prevLogIndex/prevLogTerm
+	nextIndexMap := make(map[ServerID]uint64)
+	for _, peerID := range peerIDs {
+		nextIndexMap[peerID] = s.nextIndex[peerID]
+	}
 	s.mu.RUnlock()
 
-	req := &proto.AppendEntriesRequest{
-		Term:         term,
-		LeaderId:     string(s.ID),
-		PrevLogIndex: 0,
-		PrevLogTerm:  0,
-		Entries:      nil,
-		LeaderCommit: commitIndex,
-	}
+	// Reduced logging - only log heartbeats when commitIndex changes or on errors
+
 	for _, peerID := range peerIDs {
-		go func() {
-			if _, err := s.transport.AppendEntries(context.Background(), peerID, req); err != nil {
-				log.Printf("AppendEntries (heartbeat) -> %s failed: %v", peerID, err)
+		// Defensive check: Skip sending heartbeat to ourselves
+		if peerID == s.ID {
+			log.Printf("[SERVER-%s] WARNING: Skipping heartbeat to self (peers list may be corrupted)", s.ID)
+			continue
+		}
+
+		nextIndex := nextIndexMap[peerID]
+		prevLogIndex := nextIndex - 1
+		prevLogTerm := uint64(0)
+
+		// Get the term of the previous log entry
+		if prevLogIndex > 0 {
+			entry, err := s.Log.GetEntry(prevLogIndex)
+			if err != nil {
+				log.Printf("[SERVER-%s] Error getting entry at index %d for heartbeat to %s: %v",
+					s.ID, prevLogIndex, peerID, err)
+				continue
 			}
-		}()
+			prevLogTerm = entry.Term
+		}
+
+		req := &proto.AppendEntriesRequest{
+			Term:         term,
+			LeaderId:     string(s.ID),
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
+			Entries:      nil, // Empty for heartbeat
+			LeaderCommit: commitIndex,
+		}
+
+		go func(id ServerID, request *proto.AppendEntriesRequest) {
+			_, err := s.transport.AppendEntries(context.Background(), id, request)
+			if err != nil {
+				log.Printf("[SERVER-%s] Heartbeat to %s failed: %v", s.ID, id, err)
+			}
+		}(peerID, req)
 	}
 }
 
@@ -1056,10 +1197,14 @@ func (s *Server) sendAppendEntriesToPeer(peerID ServerID, term uint64, commitInd
 		}
 
 		// Convert storage.LogEntry to proto.LogEntry
+		// IMPORTANT: Must copy ALL fields, not just Term and Command
 		for _, e := range storageEntries {
 			entries = append(entries, &proto.LogEntry{
-				Term:    e.Term,
-				Command: e.Command,
+				Index:         e.Index,
+				Term:          e.Term,
+				Type:          e.Type,
+				Command:       e.Command,
+				Configuration: e.Configuration,
 			})
 		}
 	}
@@ -1079,6 +1224,12 @@ func (s *Server) sendAppendEntriesToPeer(peerID ServerID, term uint64, commitInd
 	// Send the RPC
 	resp, err := s.transport.AppendEntries(context.Background(), peerID, req)
 	if err != nil {
+		// Check if this is a "peer not found" error (removed from cluster)
+		// In this case, silently return - it's expected behavior during membership changes
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "removed from cluster") {
+			return
+		}
+		// For other errors, log them
 		log.Printf("[TRANSPORT] AppendEntries to %s failed: %v", peerID, err)
 		return
 	}
@@ -1145,6 +1296,7 @@ func (s *Server) sendAppendEntriesToPeer(peerID ServerID, term uint64, commitInd
 // updateCommitIndex updates the leader's commitIndex based on matchIndex of followers.
 // Section 5.3 and 5.4: "If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
 // and log[N].term == currentTerm: set commitIndex = N"
+// Section 6: During joint consensus, need majority in BOTH old and new configurations
 // Must be called with s.mu held.
 func (s *Server) updateCommitIndex() {
 	// Build a sorted list of match indices (including our own last log index)
@@ -1154,52 +1306,79 @@ func (s *Server) updateCommitIndex() {
 		return
 	}
 
-	indices := []uint64{lastIndex}
-	for _, matchIndex := range s.matchIndex {
-		indices = append(indices, matchIndex)
-	}
+	// Check if we're in joint consensus
+	latestConfig := s.getLatestConfig()
+	isJoint := latestConfig != nil && latestConfig.IsJoint
 
-	// Sort in descending order
-	for i := 0; i < len(indices); i++ {
-		for j := i + 1; j < len(indices); j++ {
-			if indices[j] > indices[i] {
-				indices[i], indices[j] = indices[j], indices[i]
+	// Try each index from highest down to current commitIndex + 1
+	for n := lastIndex; n > s.commitIndex; n-- {
+		// Check that the entry's term matches currentTerm (safety check from Section 5.4.2)
+		entry, err := s.Log.GetEntry(n)
+		if err != nil || entry.Term != s.currentTerm {
+			continue
+		}
+
+		// Count how many servers have replicated this entry
+		replicatedServers := make(map[ServerID]bool)
+		replicatedServers[s.ID] = true // Leader has it
+
+		for peerID, matchIndex := range s.matchIndex {
+			if matchIndex >= n {
+				replicatedServers[peerID] = true
 			}
 		}
-	}
 
-	// The median is the N where a majority have matchIndex[i] ≥ N
-	quorum := s.quorumSize()
-	if quorum <= len(indices) {
-		newCommitIndex := indices[quorum-1]
+		// Check if we have quorum
+		hasQuorum := false
+		if isJoint {
+			// Joint consensus: need quorum in BOTH old and new configurations
+			hasQuorum = s.hasJointQuorum(latestConfig, replicatedServers)
+		} else {
+			// Normal case: need simple majority
+			committedConfig := s.getCommittedConfig()
+			if committedConfig != nil {
+				hasQuorum = s.isQuorumInConfig(committedConfig, replicatedServers)
+			} else {
+				// Fallback: use peer count
+				count := len(replicatedServers)
+				quorum := (len(s.peers)+1)/2 + 1
+				hasQuorum = count >= quorum
+			}
+		}
 
-		// Only update if:
-		// 1. newCommitIndex > commitIndex
-		// 2. log[newCommitIndex].term == currentTerm (safety check from Section 5.4.2)
-		if newCommitIndex > s.commitIndex {
-			entry, err := s.Log.GetEntry(newCommitIndex)
-			if err != nil {
-				log.Printf("[SERVER-%s] Error getting entry at index %d: %v", s.ID, newCommitIndex, err)
-				return
+		if hasQuorum {
+			// Found the highest N that can be committed
+			oldCommitIndex := s.commitIndex
+			s.commitIndex = n
+
+			// Calculate how many new entries were committed
+			numNewCommits := n - oldCommitIndex
+			if numNewCommits == 1 {
+				log.Printf("[SERVER-%s] [TERM-%d] ✓ Entry %d is now COMMITTED (majority replicated)",
+					s.ID, s.currentTerm, n)
+			} else {
+				log.Printf("[SERVER-%s] [TERM-%d] ✓ Entries %d-%d are now COMMITTED (majority replicated)",
+					s.ID, s.currentTerm, oldCommitIndex+1, n)
 			}
 
-			if entry.Term == s.currentTerm {
-				oldCommitIndex := s.commitIndex
-				s.commitIndex = newCommitIndex
+			// IMPORTANT: Release the lock before sending heartbeats to avoid blocking
+			// We need to release the lock because SendHeartbeats() will try to acquire a read lock
+			s.mu.Unlock()
 
-				// Calculate how many new entries were committed
-				numNewCommits := newCommitIndex - oldCommitIndex
-				if numNewCommits == 1 {
-					log.Printf("[SERVER-%s] [TERM-%d] ✓ Entry %d is now COMMITTED (majority replicated)",
-						s.ID, s.currentTerm, newCommitIndex)
-				} else {
-					log.Printf("[SERVER-%s] [TERM-%d] ✓ Entries %d-%d are now COMMITTED (majority replicated)",
-						s.ID, s.currentTerm, oldCommitIndex+1, newCommitIndex)
-				}
+			// Immediately send heartbeats to propagate the new commitIndex to followers
+			// This ensures followers update their commitIndex without waiting for the next periodic heartbeat
+			log.Printf("[SERVER-%s] [TERM-%d] Sending immediate heartbeats to propagate commitIndex=%d",
+				s.ID, s.currentTerm, s.commitIndex)
+			s.SendHeartbeats()
 
-				// Apply newly committed entries to the state machine
-				go s.applyCommittedEntries()
-			}
+			// Apply newly committed entries to the state machine
+			// This is called after heartbeats so followers can also start applying
+			// It will acquire its own lock as needed
+			s.applyCommittedEntries()
+
+			// Re-acquire the lock before returning (caller expects lock to be held)
+			s.mu.Lock()
+			return
 		}
 	}
 }
