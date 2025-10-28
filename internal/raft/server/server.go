@@ -175,8 +175,7 @@ func (s *Server) SetPeersWithAddresses(peers map[ServerID]ServerAddress) {
 	s.latestConfig = initialConfig
 	s.committedConfig = initialConfig
 
-	log.Printf("[SERVER-%s] Initialized configuration with %d servers (self + %d peers)",
-		s.ID, len(servers), len(peers))
+	log.Printf("[SERVER-%s] Initialized with %d server(s) (self + %d peers) in cluster", s.ID, len(servers), len(servers)-1)
 }
 
 // GetPubSub returns the server's PubSub client instance
@@ -209,6 +208,86 @@ func (s *Server) persistVotedFor(candidateID *ServerID) error {
 	return nil
 }
 
+// stepDownToFollower transitions the server to Follower state when discovering a higher term.
+// This implements the common pattern from Figure 2 in the Raft paper:
+// "If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower"
+// Must be called with s.mu held.
+func (s *Server) stepDownToFollower(newTerm uint64, reason string) {
+	oldTerm := s.currentTerm
+	oldState := s.state
+	wasLeader := s.state == Leader
+
+	// Update to new term and transition to Follower
+	s.currentTerm = newTerm
+	s.state = Follower
+	s.votedFor = nil
+	s.votersThisTerm = nil
+
+	// Clear leader-specific state
+	s.nextIndex = nil
+	s.matchIndex = nil
+
+	log.Printf("[SERVER-%s] [TERM-%d→%d] %s, reverting %s → Follower",
+		s.ID, oldTerm, s.currentTerm, reason, oldState)
+
+	// Persist the new term and reset votedFor
+	if err := s.persistCurrentTerm(s.currentTerm); err != nil {
+		log.Printf("[SERVER-%s] Error persisting current term: %v", s.ID, err)
+	}
+	if err := s.persistVotedFor(nil); err != nil {
+		log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
+	}
+
+	// If we were a leader, stop heartbeats (must be done outside the lock)
+	if wasLeader {
+		// Unlock, stop heartbeats, then relock
+		s.mu.Unlock()
+		s.StopHeartbeats()
+		s.mu.Lock()
+	}
+}
+
+// updateCommitIndexFromLeader updates the follower's commit index based on the leader's commit index.
+// Section 5.3: "If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)"
+// Must be called with s.mu held. Will temporarily release and reacquire the lock to apply entries.
+// Returns true if the commit index was updated, false otherwise.
+func (s *Server) updateCommitIndexFromLeader(leaderCommit uint64, context string) bool {
+	if leaderCommit <= s.commitIndex {
+		return false
+	}
+
+	lastLogIndex, err := s.Log.GetLastIndex()
+	if err != nil {
+		log.Printf("[SERVER-%s] Error getting last log index: %v", s.ID, err)
+		return false
+	}
+
+	oldCommitIndex := s.commitIndex
+	// Set commitIndex to min(leaderCommit, lastLogIndex)
+	if leaderCommit < lastLogIndex {
+		s.commitIndex = leaderCommit
+	} else {
+		s.commitIndex = lastLogIndex
+	}
+
+	// Only proceed if commitIndex actually changed
+	if s.commitIndex == oldCommitIndex {
+		return false
+	}
+
+	log.Printf("[SERVER-%s] [TERM-%d] Updated commitIndex from %d to %d %s (lastLogIndex=%d, leaderCommit=%d)",
+		s.ID, s.currentTerm, oldCommitIndex, s.commitIndex, context, lastLogIndex, leaderCommit)
+
+	// Release lock before applying entries to avoid blocking
+	s.mu.Unlock()
+	// Apply newly committed entries to state machine
+	s.applyCommittedEntries()
+	// Re-acquire lock for the caller
+	s.mu.Lock()
+
+	return true
+}
+
 // RequestVote handles the RequestVote RPC call from a peer's client
 func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
 	s.mu.Lock()
@@ -229,21 +308,7 @@ func (s *Server) RequestVote(ctx context.Context, req *proto.RequestVoteRequest)
 
 	// If RPC request contains term T > currentTerm: set currentTerm = T, convert to follower  (Section 5.1)
 	if req.Term > s.currentTerm {
-		oldTerm := s.currentTerm
-		s.currentTerm = req.Term
-		log.Printf("[SERVER-%s] [TERM-%d→%d] Discovered higher term in RequestVote, updating term and reverting to Follower", s.ID, oldTerm, s.currentTerm)
-		s.state = Follower
-		s.votedFor = nil
-		s.votersThisTerm = nil
-
-		// Persist the new term and reset votedFor
-		if err := s.Log.SetCurrentTerm(s.currentTerm); err != nil {
-			log.Printf("[SERVER-%s] Error persisting current term: %v", s.ID, err)
-		}
-
-		if err := s.Log.SetVotedFor(nil); err != nil {
-			log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
-		}
+		s.stepDownToFollower(req.Term, "Discovered higher term in RequestVote")
 	}
 
 	// Leaders never grant votes to other candidates in the same term
@@ -349,43 +414,8 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 
 	// if one server's current term is smaller than the other's (Section 5.1)
 	if req.Term > s.currentTerm {
-		// 1. then it updates its current term to the larger value
-		oldTerm := s.currentTerm
-		oldState := s.state
-		s.currentTerm = req.Term
-		// 2. If a candidate or leader discovers that its term is out of date, it immediately reverts to follower state
-		wasLeader := s.state == Leader
-		s.state = Follower
-		log.Printf("[SERVER-%s] [TERM-%d→%d] Discovered higher term in AppendEntries, reverting %s → Follower",
-			s.ID, oldTerm, s.currentTerm, oldState)
-		// Clear vote for new term. This is an explicit rule from Figure 2 for RequestVote and is required by the
-		// Election Safety Property. Since we are now in a new, higher term, we must reset the vote to 'null' to be
-		// eligible to vote for a candidate in this new term. (RequestVote logic) An old 'votedFor' value is only valid
-		// for the old 'currentTerm'.
-		s.votedFor = nil
-		// Clear voters map when reverting to Follower
-		s.votersThisTerm = nil
-		// Clear leader-specific state
-		s.nextIndex = nil
-		s.matchIndex = nil
-
-		// Persist currentTerm and reset votedFor
-		if err := s.Log.SetCurrentTerm(s.currentTerm); err != nil {
-			log.Printf("[SERVER-%s] Error persisting current term: %v", s.ID, err)
-		}
-		if err := s.Log.SetVotedFor(nil); err != nil {
-			log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
-		}
-
-		// If we were a leader, stop sending heartbeats
-		if wasLeader {
-			log.Printf("[SERVER-%s] [TERM-%d] Stopping heartbeats (stepped down from Leader)",
-				s.ID, s.currentTerm)
-			// Stop heartbeat timer outside the main lock to avoid deadlock
-			s.mu.Unlock()
-			s.StopHeartbeats()
-			s.mu.Lock()
-		}
+		// Note: stepDownToFollower will handle stopping heartbeats if we were a leader
+		s.stepDownToFollower(req.Term, "Discovered higher term in AppendEntries")
 	}
 
 	// Section 5.2: If a Candidate receives AppendEntries from a leader with term >= currentTerm,
@@ -399,39 +429,38 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 	}
 
 	// Reset election timeout since we received communication from a leader
-	// If this is a newly joined server that hasn't started its election timer yet, start it now
+	// If this follower hasn't started its election timer yet, start it now
 	if s.electionTimeoutTimer != nil {
 		s.electionTimeoutTimer.Reset(s.electionTimeout)
 	} else if s.state == Follower && !s.removedFromCluster {
-		// This is a new server joining the cluster - start its election timer now.
-		// We do this AFTER receiving the first AppendEntries to avoid split-brain scenarios
-		// and ensure the new server is properly synchronized before participating in elections.
+		// Start the election timer for this follower after receiving the first AppendEntries.
 		//
 		// Why wait for the first AppendEntries?
 		// =====================================
-		// 1. Discovery & Synchronization:
-		//    - Learn the current term and who the leader is
-		//    - Begin catching up on the log (receiving missing entries)
-		//    - Understand the current cluster state before making decisions
+		// This ensures the server learns about the current leader and term before potentially
+		// starting an election. This is particularly important for:
 		//
-		// 2. Avoid Premature Elections:
-		//    If we started the election timer immediately upon server startup, the new
-		//    server could time out and start an election before receiving any communication
-		//    from the leader. This would:
-		//    - Disrupt the stable leader with unnecessary elections
-		//    - Cause split votes since the new server's log is behind
-		//    - Create a split-brain scenario where the new server competes for leadership
-		//      while being completely out of sync with the cluster
+		// 1. Newly Added Servers (Section 6):
+		//    When a server is added to the cluster via AddServer, it starts with no
+		//    election timer. Delaying timer initialization until the first AppendEntries
+		//    allows the new server to:
+		//    - Discover the current leader and term
+		//    - Begin log synchronization before potentially disrupting the cluster
+		//    - Avoid premature elections while catching up on committed entries
 		//
-		// 3. Safe Integration:
-		//    By waiting for the first AppendEntries, we ensure:
-		//    - The new server acknowledges the current leader's authority
-		//    - The server begins log replication and catches up on committed entries
-		//    - The server is ready to participate in consensus with up-to-date information
-		//    - The cluster remains stable during the membership change
+		// 2. Servers Started in Standalone Mode:
+		//    Some servers may be started without immediately calling StartElectionTimer()
+		//    (e.g., when waiting to join an existing cluster). These servers should also
+		//    wait for leader contact before starting to participate in elections.
 		//
-		// This approach implements Raft's safe server addition protocol (Section 6 of the paper),
-		// where new servers must catch up before being able to fully participate in the cluster.
+		// Benefits:
+		// - Prevents a behind server from disrupting a stable leader unnecessarily
+		// - Ensures the server acknowledges current leadership before timing out
+		// - Reduces split votes from servers with incomplete log state
+		//
+		// Note: This is an implementation optimization. Standard cluster initialization
+		// (where all servers start together) explicitly calls StartElectionTimer() after
+		// orchestrators are ready, so those servers won't hit this code path.
 		//
 		// IMPORTANT: Do not start election timer if this server has been removed from the cluster.
 		// A removed server (removedFromCluster=true) should never participate in elections again.
@@ -450,33 +479,7 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 	// Section 5.3: "If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)"
 	if len(req.Entries) == 0 {
 		// This is a heartbeat - still need to update commitIndex if leaderCommit is higher
-		if req.LeaderCommit > s.commitIndex {
-			lastLogIndex, err := s.Log.GetLastIndex()
-			if err != nil {
-				log.Printf("[SERVER-%s] Error getting last log index: %v", s.ID, err)
-			} else {
-				oldCommitIndex := s.commitIndex
-				// Set commitIndex to min(leaderCommit, lastLogIndex)
-				if req.LeaderCommit < lastLogIndex {
-					s.commitIndex = req.LeaderCommit
-				} else {
-					s.commitIndex = lastLogIndex
-				}
-
-				// Only log if commitIndex actually changed
-				if s.commitIndex != oldCommitIndex {
-					log.Printf("[SERVER-%s] [TERM-%d] Updated commitIndex from %d to %d via heartbeat (lastLogIndex=%d, leaderCommit=%d)",
-						s.ID, s.currentTerm, oldCommitIndex, s.commitIndex, lastLogIndex, req.LeaderCommit)
-
-					// Release lock before applying entries to avoid blocking
-					s.mu.Unlock()
-					// Apply newly committed entries to state machine
-					s.applyCommittedEntries()
-					// Re-acquire lock for the defer unlock
-					s.mu.Lock()
-				}
-			}
-		}
+		s.updateCommitIndexFromLeader(req.LeaderCommit, "via heartbeat")
 
 		return &proto.AppendEntriesResponse{
 			Term:    s.currentTerm,
@@ -553,33 +556,7 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 	}
 
 	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-	if req.LeaderCommit > s.commitIndex {
-		// Find the index of the last entry in our log
-		// This could be from the new entries we just appended, or from entries we already had
-		lastLogIndex, err := s.Log.GetLastIndex()
-		if err != nil {
-			log.Printf("[SERVER-%s] Error getting last log index: %v", s.ID, err)
-		} else {
-			oldCommitIndex := s.commitIndex
-			// Set commitIndex to min(leaderCommit, lastLogIndex)
-			if req.LeaderCommit < lastLogIndex {
-				s.commitIndex = req.LeaderCommit
-			} else {
-				s.commitIndex = lastLogIndex
-			}
-			log.Printf("[SERVER-%s] [TERM-%d] Updated commitIndex from %d to %d (lastLogIndex=%d, leaderCommit=%d)",
-				s.ID, s.currentTerm, oldCommitIndex, s.commitIndex, lastLogIndex, req.LeaderCommit)
-
-			// Release lock before applying entries to avoid blocking
-			// applyCommittedEntries() needs to acquire the lock itself
-			s.mu.Unlock()
-			// Apply newly committed entries to state machine
-			// This must be called synchronously to ensure entries are applied before we return
-			s.applyCommittedEntries()
-			// Re-acquire lock for the defer unlock
-			s.mu.Lock()
-		}
-	}
+	s.updateCommitIndexFromLeader(req.LeaderCommit, "")
 
 	log.Printf("[SERVER-%s] [TERM-%d] [RPC] Successfully replicated %d entries from Leader %s",
 		s.ID, s.currentTerm, len(req.Entries), req.LeaderId)
@@ -805,36 +782,7 @@ func (s *Server) BeginElection() {
 				s.mu.Lock()
 
 				if resp.Term > s.currentTerm {
-					oldTerm := s.currentTerm
-					oldState := s.state
-					s.currentTerm = resp.Term
-					wasLeader := s.state == Leader
-					s.state = Follower
-					s.votedFor = nil
-					// Clear voters map when reverting to Follower
-					s.votersThisTerm = nil
-					// Clear leader-specific state
-					s.nextIndex = nil
-					s.matchIndex = nil
-
-					log.Printf("[SERVER-%s] [TERM-%d→%d] Discovered higher term in RequestVote response from %s, reverting %s → Follower",
-						s.ID, oldTerm, s.currentTerm, peerID, oldState)
-
-					// Persist term change
-					if err := s.Log.SetCurrentTerm(s.currentTerm); err != nil {
-						log.Printf("[SERVER-%s] Error persisting current term: %v", s.ID, err)
-					}
-					if err := s.Log.SetVotedFor(nil); err != nil {
-						log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
-					}
-
-					s.mu.Unlock()
-
-					// If we were a leader, stop sending heartbeats
-					if wasLeader {
-						s.StopHeartbeats()
-					}
-					return
+					s.stepDownToFollower(resp.Term, fmt.Sprintf("Discovered higher term in RequestVote response from %s", peerID))
 				}
 
 				s.mu.Unlock()
@@ -1256,24 +1204,7 @@ func (s *Server) sendAppendEntriesToPeer(peerID ServerID, term uint64, commitInd
 	// Handle response
 	if resp.Term > s.currentTerm {
 		// Discovered a higher term, step down
-		log.Printf("[SERVER-%s] [TERM-%d→%d] Discovered higher term in AppendEntries response from %s, stepping down",
-			s.ID, s.currentTerm, resp.Term, peerID)
-		s.currentTerm = resp.Term
-		s.state = Follower
-		s.votedFor = nil
-		s.votersThisTerm = nil
-		s.nextIndex = nil
-		s.matchIndex = nil
-
-		// Persist the term change
-		if err := s.Log.SetCurrentTerm(s.currentTerm); err != nil {
-			log.Printf("[SERVER-%s] Error persisting current term: %v", s.ID, err)
-		}
-		if err := s.Log.SetVotedFor(nil); err != nil {
-			log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
-		}
-
-		s.StopHeartbeats()
+		s.stepDownToFollower(resp.Term, fmt.Sprintf("Discovered higher term in AppendEntries response from %s", peerID))
 		return
 	}
 
@@ -1575,26 +1506,7 @@ func (s *Server) handleAppendEntriesResponse(peerID ServerID, req *proto.AppendE
 
 	// If response contains a higher term, step down
 	if resp.Term > s.currentTerm {
-		log.Printf("[SERVER-%s] [TERM-%d→%d] Discovered higher term in AppendEntries response, stepping down",
-			s.ID, s.currentTerm, resp.Term)
-		s.currentTerm = resp.Term
-		s.state = Follower
-		s.votedFor = nil
-		s.votersThisTerm = nil
-		s.nextIndex = nil
-		s.matchIndex = nil
-
-		// Persist the term change
-		if err := s.Log.SetCurrentTerm(s.currentTerm); err != nil {
-			log.Printf("[SERVER-%s] Error persisting current term: %v", s.ID, err)
-		}
-		if err := s.Log.SetVotedFor(nil); err != nil {
-			log.Printf("[SERVER-%s] Error persisting votedFor: %v", s.ID, err)
-		}
-
-		s.mu.Unlock()
-		s.StopHeartbeats()
-		s.mu.Lock()
+		s.stepDownToFollower(resp.Term, "Discovered higher term in AppendEntries response")
 		return
 	}
 

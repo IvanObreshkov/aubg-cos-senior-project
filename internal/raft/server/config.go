@@ -136,8 +136,6 @@ func (s *Server) initializeConfiguration() {
 
 	s.committedConfig = initialConfig
 	s.latestConfig = initialConfig
-
-	log.Printf("[SERVER-%s] Initialized with configuration: %d servers", s.ID, len(servers))
 }
 
 // AddServer handles the AddServer RPC (Section 6)
