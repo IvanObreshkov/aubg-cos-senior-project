@@ -83,7 +83,13 @@ func main() {
 	<-signalCtx.Done()
 
 	log.Println("Shutting down...")
+
+	// Gracefully shutdown the server (stops gRPC, closes transport, closes DB)
 	srv.GracefulShutdown()
+
+	// Shutdown the pubsub to drain any remaining events
+	pubSub.GracefulShutdown()
+
 	log.Println("Server stopped")
 }
 
