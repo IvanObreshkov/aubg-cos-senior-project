@@ -63,6 +63,10 @@ type serverState struct {
 	// a current leader exists (within minimum election timeout of last leader contact).
 	lastLeaderContact time.Time
 
+	// currentLeader tracks the ID of the known leader in the current term
+	// Updated when receiving AppendEntries from a leader, used for client redirection
+	currentLeader *ServerID
+
 	// Configuration state (Section 6: Cluster membership changes)
 	// committedConfig is the latest committed configuration (C_old or C_new)
 	// This is the configuration used once joint consensus is complete
@@ -79,6 +83,9 @@ type serverState struct {
 	// removedFromCluster tracks whether this server has been removed from the cluster configuration
 	// Once set to true, the server should not participate in elections or consensus anymore
 	removedFromCluster bool
+
+	// electionStartTime tracks when the current election started (for metrics)
+	electionStartTime time.Time
 }
 
 func (s *serverState) getState() State {

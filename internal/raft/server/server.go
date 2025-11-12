@@ -58,6 +58,8 @@ type Server struct {
 	heartbeatTimer *time.Timer
 	// pubSub is used to send events about the state of the server to subscribed listeners
 	pubSub *pubsub.PubSubClient
+	// Metrics collector for performance measurement (optional, can be nil)
+	Metrics MetricsCollector
 }
 
 // getLatestConfig returns the latest configuration (may be uncommitted)
@@ -139,7 +141,7 @@ func (s *Server) isLogUpToDate(candidateLastLogIndex, candidateLastLogTerm uint6
 // SetPeers updates the list of peer server IDs and reinitializes the transport with the new peer list
 func (s *Server) SetPeers(peerIDs []ServerID) {
 	s.peers = peerIDs
-	s.transport = NewTransport(peerIDs)
+	s.transport = NewTransport(peerIDs, s.Metrics)
 }
 
 // SetPeersWithAddresses updates the list of peers with both IDs and addresses,
@@ -154,7 +156,7 @@ func (s *Server) SetPeersWithAddresses(peers map[ServerID]ServerAddress) {
 		peerIDs = append(peerIDs, id)
 	}
 	s.peers = peerIDs
-	s.transport = NewTransport(peerIDs)
+	s.transport = NewTransport(peerIDs, s.Metrics)
 
 	// Initialize configuration with ALL servers in the cluster
 	servers := []*proto.ServerConfig{
@@ -222,6 +224,7 @@ func (s *Server) stepDownToFollower(newTerm uint64, reason string) {
 	s.state = Follower
 	s.votedFor = nil
 	s.votersThisTerm = nil
+	s.currentLeader = nil // Clear stale leader information
 
 	// Clear leader-specific state
 	s.nextIndex = nil
@@ -428,6 +431,10 @@ func (s *Server) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequ
 		s.votersThisTerm = nil
 	}
 
+	// Track the current leader for client redirection
+	leaderID := ServerID(req.LeaderId)
+	s.currentLeader = &leaderID
+
 	// Reset election timeout since we received communication from a leader
 	// If this follower hasn't started its election timer yet, start it now
 	if s.electionTimeoutTimer != nil {
@@ -576,11 +583,12 @@ func (s *Server) ClientCommand(ctx context.Context, req *proto.ClientCommandRequ
 	if s.state != Leader {
 		// Not the leader - try to redirect to leader if known
 		leaderID := ""
-		// In a production system, we'd track the leader ID from AppendEntries RPCs
-		// For now, we just return empty leader ID
+		if s.currentLeader != nil {
+			leaderID = string(*s.currentLeader)
+		}
 
-		log.Printf("[SERVER-%s] [TERM-%d] [RPC] ClientCommand rejected - not the leader",
-			s.ID, s.currentTerm)
+		log.Printf("[SERVER-%s] [TERM-%d] [RPC] ClientCommand rejected - not the leader (suggesting leader: %s)",
+			s.ID, s.currentTerm, leaderID)
 		s.mu.Unlock()
 		return &proto.ClientCommandResponse{
 			Success:  false,
@@ -698,6 +706,12 @@ func (s *Server) BeginElection() {
 
 	// Start on a clean state
 	s.votersThisTerm = make(map[ServerID]struct{}, len(s.peers)+1)
+
+	// Track election start time for metrics
+	s.electionStartTime = time.Now()
+	if s.Metrics != nil {
+		s.Metrics.RecordElection()
+	}
 
 	// 1. Increment the currentTerm of the Server
 	oldTerm := s.currentTerm
@@ -879,6 +893,12 @@ func (s *Server) OnElectionWon(term uint64) {
 
 	log.Printf("[SERVER-%s] [TERM-%d] Transitioning Candidate → Leader, won election!",
 		s.ID, term)
+
+	// Record election duration for metrics
+	if !s.electionStartTime.IsZero() && s.Metrics != nil {
+		electionDuration := time.Since(s.electionStartTime)
+		s.Metrics.RecordElectionDuration(electionDuration)
+	}
 
 	// Transition to Leader state
 	s.state = Leader
@@ -1155,8 +1175,6 @@ func (s *Server) sendAppendEntriesToPeer(peerID ServerID, term uint64, commitInd
 			return
 		}
 
-		// Convert storage.LogEntry to proto.LogEntry
-		// IMPORTANT: Must copy ALL fields, not just Term and Command
 		for _, e := range storageEntries {
 			entries = append(entries, &proto.LogEntry{
 				Index:         e.Index,
@@ -1223,14 +1241,17 @@ func (s *Server) sendAppendEntriesToPeer(peerID ServerID, term uint64, commitInd
 			s.updateCommitIndex()
 		}
 	} else {
-		// Log inconsistency, decrement nextIndex and retry
+		// Replication failed - decrement nextIndex and retry
+		// Since we already checked for higher terms before acquiring the lock,
+		// this failure is due to log inconsistency
 		if s.nextIndex[peerID] > 1 {
+			oldNextIndex := s.nextIndex[peerID]
 			s.nextIndex[peerID]--
-			log.Printf("[SERVER-%s] [TERM-%d] Log inconsistency with %s, decremented nextIndex to %d",
-				s.ID, term, peerID, s.nextIndex[peerID])
+			log.Printf("[SERVER-%s] [TERM-%d] AppendEntries to %s failed (log inconsistency at prevLogIndex=%d), decrementing nextIndex %d → %d",
+				s.ID, s.currentTerm, peerID, prevLogIndex, oldNextIndex, s.nextIndex[peerID])
 
-			// Retry immediately
-			go s.sendAppendEntriesToPeer(peerID, term, commitIndex)
+			// Retry replication in background
+			go s.replicateToPeer(peerID, term, commitIndex)
 		}
 	}
 }
@@ -1531,10 +1552,15 @@ func (s *Server) handleAppendEntriesResponse(peerID ServerID, req *proto.AppendE
 		}
 	} else {
 		// Replication failed - decrement nextIndex and retry
+		// This can happen for two reasons:
+		// 1. Log inconsistency: follower's log doesn't match at prevLogIndex
+		// 2. Stale term: leader's term is outdated (already handled above)
+		// Since we check for higher terms above, this is log inconsistency
 		if s.nextIndex[peerID] > 1 {
+			oldNextIndex := s.nextIndex[peerID]
 			s.nextIndex[peerID]--
-			log.Printf("[SERVER-%s] [TERM-%d] AppendEntries to %s failed, decrementing nextIndex to %d",
-				s.ID, s.currentTerm, peerID, s.nextIndex[peerID])
+			log.Printf("[SERVER-%s] [TERM-%d] AppendEntries to %s failed (log inconsistency at prevLogIndex=%d), decrementing nextIndex %d → %d",
+				s.ID, s.currentTerm, peerID, req.PrevLogIndex, oldNextIndex, s.nextIndex[peerID])
 
 			// Retry replication in background
 			go s.replicateToPeer(peerID, s.currentTerm, s.commitIndex)
@@ -1708,7 +1734,7 @@ func NewServer(currentTerm uint64, addr ServerAddress, peers []ServerID, pubSub 
 		Address:      addr,
 		Log:          store,
 		StateMachine: state_machine.NewKVStateMachine(string(serverID)),
-		transport:    NewTransport(peers),
+		transport:    NewTransport(peers, nil), // Metrics can be set later via SetMetrics
 		peers:        peers,
 		pubSub:       pubSub,
 	}
@@ -1717,4 +1743,13 @@ func NewServer(currentTerm uint64, addr ServerAddress, peers []ServerID, pubSub 
 	server.initializeConfiguration()
 
 	return server
+}
+
+// SetMetrics sets the metrics collector for the server and updates the transport
+func (s *Server) SetMetrics(metrics MetricsCollector) {
+	s.Metrics = metrics
+	// Update transport with metrics
+	if s.transport != nil {
+		s.transport.metrics = metrics
+	}
 }
