@@ -47,6 +47,8 @@ type Transport struct {
 	// sync.Map provides thread-safe access to the map, and is optimized for read operations, reducing the overhead of
 	// manual locks
 	clientsConnPool *sync.Map
+	// Optional metrics collector
+	metrics MetricsCollector
 }
 
 // getClientConn retrieves a grpc.ClientConn for the given server.ServerID from the connection pool
@@ -66,6 +68,11 @@ func (t *Transport) getClientConn(peerID ServerID) (*grpc.ClientConn, error) {
 }
 
 func (t *Transport) RequestVote(ctx context.Context, peerID ServerID, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
+	// Record metrics if available
+	if t.metrics != nil {
+		t.metrics.RecordRequestVote()
+	}
+
 	conn, err := t.getClientConn(peerID)
 	if err != nil {
 		// Peer no longer in cluster - this is expected during membership changes
@@ -116,6 +123,15 @@ func (t *Transport) RequestVote(ctx context.Context, peerID ServerID, req *proto
 }
 
 func (t *Transport) AppendEntries(ctx context.Context, peerID ServerID, req *proto.AppendEntriesRequest) (*proto.AppendEntriesResponse, error) {
+	// Record metrics if available
+	if t.metrics != nil {
+		if len(req.Entries) == 0 {
+			t.metrics.RecordHeartbeat()
+		} else {
+			t.metrics.RecordAppendEntries()
+		}
+	}
+
 	conn, err := t.getClientConn(peerID)
 	if err != nil {
 		// Peer no longer in cluster - this is expected during membership changes
@@ -271,8 +287,11 @@ func (t *Transport) RemovePeer(peerID ServerID) {
 	}
 }
 
-func NewTransport(peerIDs []ServerID) *Transport {
-	transport := &Transport{clientsConnPool: &sync.Map{}}
+func NewTransport(peerIDs []ServerID, metrics MetricsCollector) *Transport {
+	transport := &Transport{
+		clientsConnPool: &sync.Map{},
+		metrics:         metrics,
+	}
 
 	transport.initClients(peerIDs)
 
