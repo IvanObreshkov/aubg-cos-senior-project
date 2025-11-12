@@ -1644,7 +1644,13 @@ func (s *Server) GracefulShutdown() {
 
 	log.Printf("[SERVER-%s] [TERM-%d] Shutting down server gracefully (state=%s)", serverID, currentTerm, currentState)
 
-	// First, stop accepting new incoming requests, in order to prevent interrupting a pending response to a peer
+	// First, stop heartbeats if we're a leader (prevents database access after close)
+	if currentState == Leader {
+		s.StopHeartbeats()
+		log.Printf("[SERVER-%s] Stopped heartbeats", serverID)
+	}
+
+	// Stop accepting new incoming requests, in order to prevent interrupting a pending response to a peer
 	s.grpcServer.GracefulStop()
 	log.Printf("[SERVER-%s] Stopped gRPC server", serverID)
 
@@ -1666,6 +1672,16 @@ func (s *Server) GracefulShutdown() {
 
 func (s *Server) ForceShutdown() {
 	log.Printf("Force shutting down server %s", s.ID)
+
+	// Stop heartbeats if running (prevents database access after close)
+	s.mu.RLock()
+	isLeader := s.state == Leader
+	s.mu.RUnlock()
+
+	if isLeader {
+		s.StopHeartbeats()
+	}
+
 	s.transport.CloseAllClients()
 	s.grpcServer.Stop()
 
