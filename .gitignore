@@ -34,3 +34,7 @@ go.work.sum
 data/
 # Benchmarks saved from running protocols
 benchmarks/
+# Ignore the folder containing built binaries for the protocols
+bin/
+# Ignore the logs folder
+logs/
