@@ -244,6 +244,16 @@ func runBenchmark(leaderAddr string, numCommands int, metrics *metrics.Metrics) 
 	pendingCmds := make(map[uint64]pendingCommand)
 	var pendingMu sync.Mutex
 
+	// Track failed commands for retry
+	type failedCommand struct {
+		cmdNum      int
+		cmd         string
+		retryCount  int
+		lastAttempt time.Time
+	}
+	failedCmds := make(map[int]failedCommand) // map[commandNumber]failedCommand
+	var failedMu sync.Mutex
+
 	// Start a goroutine to check for commits
 	commitCheckDone := make(chan bool)
 	go func() {
@@ -320,6 +330,16 @@ func runBenchmark(leaderAddr string, numCommands int, metrics *metrics.Metrics) 
 			failCount++
 			consecutiveFailures++
 
+			// Track this command for retry
+			failedMu.Lock()
+			failedCmds[commandsSent] = failedCommand{
+				cmdNum:      commandsSent,
+				cmd:         cmd,
+				retryCount:  1,
+				lastAttempt: submitTime,
+			}
+			failedMu.Unlock()
+
 			// Log the error with context
 			if err != nil {
 				fmt.Printf("  ⚠️  Command %d failed to %s: %v\n", commandsSent, leader, err)
@@ -389,6 +409,117 @@ func runBenchmark(leaderAddr string, numCommands int, metrics *metrics.Metrics) 
 
 		// Small delay to avoid overwhelming the leader
 		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Retry failed commands (up to 3 attempts per command)
+	const maxRetries = 3
+	fmt.Println()
+	failedMu.Lock()
+	numInitialFailures := len(failedCmds)
+	failedMu.Unlock()
+
+	if numInitialFailures > 0 {
+		fmt.Printf("Initial send complete. Retrying %d failed commands...\n", numInitialFailures)
+
+		retryRound := 0
+		for {
+			failedMu.Lock()
+			numFailed := len(failedCmds)
+			if numFailed == 0 {
+				failedMu.Unlock()
+				break
+			}
+
+			// Copy failed commands for this retry round
+			toRetry := make([]failedCommand, 0, len(failedCmds))
+			for _, fc := range failedCmds {
+				if fc.retryCount <= maxRetries {
+					toRetry = append(toRetry, fc)
+				} else {
+					fmt.Printf("  ⚠️  Command %d exceeded max retries (%d), giving up\n", fc.cmdNum, maxRetries)
+					delete(failedCmds, fc.cmdNum)
+				}
+			}
+			failedMu.Unlock()
+
+			if len(toRetry) == 0 {
+				break
+			}
+
+			retryRound++
+			fmt.Printf("\n→ Retry round %d: attempting %d failed commands\n", retryRound, len(toRetry))
+
+			for _, fc := range toRetry {
+				leaderMu.RLock()
+				leader := currentLeader
+				leaderMu.RUnlock()
+
+				submitTime := time.Now()
+				success, index, suggestedLeaderID, err := submitCommand(leader, fc.cmd)
+
+				if success {
+					successCount++
+					failCount-- // Remove from fail count
+					fmt.Printf("  ✓ Command %d succeeded on retry %d\n", fc.cmdNum, fc.retryCount)
+
+					// Track for latency
+					pendingMu.Lock()
+					pendingCmds[index] = pendingCommand{
+						submitTime: submitTime,
+						index:      index,
+					}
+					pendingMu.Unlock()
+
+					// Remove from failed list
+					failedMu.Lock()
+					delete(failedCmds, fc.cmdNum)
+					failedMu.Unlock()
+				} else {
+					// Update retry count
+					failedMu.Lock()
+					if existing, ok := failedCmds[fc.cmdNum]; ok {
+						existing.retryCount++
+						existing.lastAttempt = submitTime
+						failedCmds[fc.cmdNum] = existing
+						fmt.Printf("  ⚠️  Command %d failed retry %d/%d", fc.cmdNum, existing.retryCount, maxRetries)
+						if err != nil {
+							fmt.Printf(": %v\n", err)
+						} else {
+							fmt.Println()
+						}
+					}
+					failedMu.Unlock()
+
+					// Handle leader redirection
+					if suggestedLeaderID != "" {
+						if addrInterface, ok := serverIDToAddr.Load(suggestedLeaderID); ok {
+							suggestedAddr := addrInterface.(string)
+							if suggestedAddr != leader {
+								leaderMu.Lock()
+								currentLeader = suggestedAddr
+								leaderMu.Unlock()
+								fmt.Printf("  → Redirected to suggested leader: %s\n", suggestedAddr)
+							}
+						}
+					}
+				}
+
+				time.Sleep(20 * time.Millisecond)
+			}
+
+			// Wait before next retry round
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		fmt.Println()
+		failedMu.Lock()
+		finalFailures := len(failedCmds)
+		failedMu.Unlock()
+		if finalFailures > 0 {
+			fmt.Printf("⚠️  %d commands could not be successfully submitted after retries\n", finalFailures)
+		} else {
+			fmt.Printf("✓ All failed commands successfully retried\n")
+		}
 	}
 
 	fmt.Println()
