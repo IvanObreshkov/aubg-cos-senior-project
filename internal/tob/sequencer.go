@@ -6,8 +6,10 @@ import (
 )
 
 // Sequencer manages sequence number assignment for Total Order Broadcast
-// Paper: "Fixed Sequencer algorithm uses a centralized sequencer that
+// Paper (Section 4.1): "Fixed Sequencer algorithm uses a centralized sequencer that
 // assigns a sequence number to each message in the order it receives them"
+//
+// Implementation detail: Uses a buffered channel (queue) to preserve FIFO order
 type Sequencer struct {
 	nextSeqNum   uint64
 	mu           sync.Mutex
@@ -20,7 +22,7 @@ type Sequencer struct {
 // NewSequencer creates a new sequencer
 func NewSequencer(tob *TOBroadcast) *Sequencer {
 	return &Sequencer{
-		nextSeqNum:   1,
+		nextSeqNum:   1, // Implementation choice: sequence numbers start from 1
 		messageQueue: make(chan *Message, 100),
 		tob:          tob,
 		stopCh:       make(chan struct{}),
@@ -34,8 +36,7 @@ func (s *Sequencer) Start() {
 	s.wg.Add(1)
 	go s.runSequencer()
 
-	// Start heartbeat mechanism
-	// Paper: "The sequencer must be monitored for failures"
+	// Implementation detail: Heartbeat mechanism for failure detection (extension beyond Section 4.1)
 	s.wg.Add(1)
 	go s.sendHeartbeats()
 }
@@ -47,7 +48,7 @@ func (s *Sequencer) Stop() {
 }
 
 // SubmitMessage submits a message to the sequencer for sequence number assignment
-// Paper: "When a process wants to broadcast a message m, it sends m to the sequencer"
+// Paper (Section 4.1): "When a process wants to broadcast a message m, it sends m to the sequencer"
 func (s *Sequencer) SubmitMessage(msg *Message) error {
 	select {
 	case s.messageQueue <- msg:
@@ -62,7 +63,7 @@ func (s *Sequencer) SubmitMessage(msg *Message) error {
 }
 
 // runSequencer processes messages and assigns sequence numbers
-// Paper: "The sequencer assigns a sequence number to each message
+// Paper (Section 4.1): "The sequencer assigns a sequence number to each message
 // in the order it receives them"
 func (s *Sequencer) runSequencer() {
 	defer s.wg.Done()
@@ -78,9 +79,11 @@ func (s *Sequencer) runSequencer() {
 }
 
 // processMessage assigns a sequence number and broadcasts it
-// Paper: "The sequencer multicasts the message along with its sequence number
+// Paper (Section 4.1): "The sequencer multicasts the message along with its sequence number
 // to all processes (including itself)"
 func (s *Sequencer) processMessage(msg *Message) {
+	startTime := time.Now()
+
 	// Assign sequence number
 	s.mu.Lock()
 	seqNum := s.nextSeqNum
@@ -104,10 +107,14 @@ func (s *Sequencer) processMessage(msg *Message) {
 	// Multicast to all nodes
 	// Paper: "The sequencer multicasts the sequenced message to all processes"
 	s.tob.multicastSequencedMessage(sequencedMsg)
+
+	// Record sequencing latency
+	sequencingLatency := time.Since(startTime)
+	s.tob.metrics.RecordSequencingLatency(sequencingLatency)
+	s.tob.metrics.RecordSequencedMsg()
 }
 
 // sendHeartbeats sends periodic heartbeats to detect sequencer failures
-// Paper: "Failure of the sequencer must be detected to ensure liveness"
 func (s *Sequencer) sendHeartbeats() {
 	defer s.wg.Done()
 
@@ -138,6 +145,8 @@ func (s *Sequencer) sendHeartbeat() {
 		if nodeAddr != s.tob.config.AdvertiseAddr {
 			if err := s.tob.transport.SendMessage(nodeAddr, msg); err != nil {
 				s.tob.config.Logger.Errorf("[Sequencer] Failed to send heartbeat to %s: %v", nodeAddr, err)
+			} else {
+				s.tob.metrics.RecordHeartbeatMsg()
 			}
 		}
 	}

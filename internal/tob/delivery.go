@@ -7,7 +7,7 @@ import (
 )
 
 // DeliveryManager manages ordered delivery of messages
-// Paper: "Messages are delivered to the application in sequence number order"
+// Paper (Section 4.1): "Messages are delivered to the application in sequence number order"
 type DeliveryManager struct {
 	nextExpectedSeq uint64
 	pendingMessages *MessageHeap
@@ -47,7 +47,7 @@ func (dm *DeliveryManager) Stop() {
 }
 
 // AddSequencedMessage adds a sequenced message to the delivery queue
-// Paper: "When a process receives a message with sequence number s,
+// Paper (Section 4.1): "When a process receives a message with sequence number s,
 // it holds the message until it has delivered all messages with
 // sequence numbers less than s"
 func (dm *DeliveryManager) AddSequencedMessage(msg *Message) {
@@ -70,7 +70,7 @@ func (dm *DeliveryManager) AddSequencedMessage(msg *Message) {
 }
 
 // deliverPendingMessages delivers all messages in sequence order
-// Paper: "Messages are delivered in increasing sequence number order"
+// Paper (Section 4.1): "Messages are delivered in increasing sequence number order"
 func (dm *DeliveryManager) deliverPendingMessages() {
 	for dm.pendingMessages.Len() > 0 {
 		// Peek at the next message
@@ -87,8 +87,8 @@ func (dm *DeliveryManager) deliverPendingMessages() {
 
 			// Calculate latency
 			latency := time.Since(msg.Timestamp)
-			dm.tob.stats.UpdateAverageLatency(latency)
-			dm.tob.stats.IncrementMessagesDelivered()
+			dm.tob.metrics.RecordBroadcastLatency(latency)
+			dm.tob.metrics.RecordMessageDelivered()
 
 			dm.tob.config.Logger.Infof("[Delivery] Delivering message %s (seq=%d, latency=%v)",
 				msg.MessageID, msg.SequenceNumber, latency)
@@ -103,12 +103,14 @@ func (dm *DeliveryManager) deliverPendingMessages() {
 			// Gap in sequence - wait for missing messages
 			dm.tob.config.Logger.Debugf("[Delivery] Gap detected: have seq=%d, expecting seq=%d",
 				nextMsg.SequenceNumber, dm.nextExpectedSeq)
+			dm.tob.metrics.RecordSequenceGap()
 			break
 		} else {
 			// This message has a sequence number less than expected (duplicate or out of order)
 			// This shouldn't happen with correct sequencer, but handle defensively
 			dm.tob.config.Logger.Warnf("[Delivery] Received duplicate or out-of-order message seq=%d (expecting %d)",
 				nextMsg.SequenceNumber, dm.nextExpectedSeq)
+			dm.tob.metrics.RecordOutOfOrder()
 			heap.Pop(dm.pendingMessages)
 		}
 	}

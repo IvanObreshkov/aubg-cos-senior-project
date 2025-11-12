@@ -85,11 +85,6 @@ func main() {
 			*nodeID, deliveryCount, msg.From, msg.SequenceNumber, string(msg.Payload))
 	})
 
-	// Set sequencer change callback
-	tobNode.SetSequencerChangeCallback(func(oldSeq, newSeq string) {
-		log.Printf("[%s] Sequencer changed: %s -> %s", *nodeID, oldSeq, newSeq)
-	})
-
 	// Start TOB node
 	if err := tobNode.Start(); err != nil {
 		log.Fatalf("Failed to start TOB node: %v", err)
@@ -121,14 +116,20 @@ func main() {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			stats := tobNode.GetStatistics()
-			log.Printf("[%s] Statistics: Sent=%d, Delivered=%d, Dropped=%d, AvgLatency=%v, SeqChanges=%d",
+			metrics := tobNode.GetMetrics()
+			report := metrics.GetReport(1) // Single node report
+
+			log.Printf("[%s] Metrics: DataMsg=%d, Delivered=%d, Throughput=%.2f msg/s",
 				*nodeID,
-				stats.GetMessagesSent(),
-				stats.GetMessagesDelivered(),
-				stats.GetMessagesDropped(),
-				stats.AverageLatency,
-				stats.GetSequencerChanges())
+				report.DataMsgCount,
+				report.MessagesDelivered,
+				report.MessageThroughput)
+
+			log.Printf("[%s] Latency: P50=%.2fms, P95=%.2fms, P99=%.2fms",
+				*nodeID,
+				report.BroadcastLatency.P50,
+				report.BroadcastLatency.P95,
+				report.BroadcastLatency.P99)
 
 			log.Printf("[%s] State: Sequencer=%s, NextExpected=%d, Pending=%d",
 				*nodeID,
