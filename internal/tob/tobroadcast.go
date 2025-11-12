@@ -18,16 +18,22 @@ var (
 )
 
 // TOBroadcast implements the Fixed Sequencer Total Order Broadcast protocol
-// Paper: "In the Fixed Sequencer algorithm, a centralized process (the sequencer)
+// Paper (Section 4.1): "In the Fixed Sequencer algorithm, a centralized process (the sequencer)
 // is designated. When a process wants to broadcast a message, it sends the message
 // to the sequencer. The sequencer assigns a sequence number to the message and
 // multicasts it to all processes. Processes deliver messages in sequence number order."
+//
+// Implementation choices:
+// - Two-phase message flow (DataMsg → SequencedMsg) for clarity
+// - Heartbeat-based failure detection
+// - Fixed sequencer without automatic failover
+// - Sequence numbers start from 1
 type TOBroadcast struct {
 	config    *Config
 	transport Transport
 	sequencer *Sequencer
 	delivery  *DeliveryManager
-	stats     *Statistics
+	metrics   *Metrics // Performance metrics
 
 	// State management
 	isSequencer      bool
@@ -41,8 +47,7 @@ type TOBroadcast struct {
 	monitorStopCh chan struct{}
 
 	// Callbacks
-	deliveryCallback        DeliveryCallback
-	sequencerChangeCallback SequencerChangeCallback
+	deliveryCallback DeliveryCallback
 
 	// Lifecycle management
 	started bool
@@ -61,7 +66,7 @@ func New(config *Config) (*TOBroadcast, error) {
 		isSequencer:      config.IsSequencer,
 		currentSequencer: config.SequencerID,
 		sequencerAddr:    config.SequencerAddr,
-		stats:            &Statistics{},
+		metrics:          NewMetrics(),
 		stopCh:           make(chan struct{}),
 		monitorStopCh:    make(chan struct{}),
 	}
@@ -175,10 +180,15 @@ func (tob *TOBroadcast) Stop() error {
 }
 
 // Broadcast sends a message using Total Order Broadcast
-// Paper: "When a process wants to broadcast a message m, it sends m to the sequencer"
+// Paper (Section 4.1): "When a process wants to broadcast a message m, it sends m to the sequencer"
 func (tob *TOBroadcast) Broadcast(payload []byte) error {
 	if !tob.started {
 		return ErrNotStarted
+	}
+
+	// Check if sequencer is reachable before accepting broadcast
+	if !tob.IsSequencer() && !tob.IsSequencerReachable() {
+		return fmt.Errorf("%w: sequencer is unreachable (ordering has stopped)", ErrNoSequencer)
 	}
 
 	// Create message
@@ -192,7 +202,7 @@ func (tob *TOBroadcast) Broadcast(payload []byte) error {
 	}
 
 	tob.config.Logger.Debugf("[TOB] Broadcasting message %s (size: %d bytes)", msg.MessageID, len(payload))
-	tob.stats.IncrementMessagesSent()
+	tob.metrics.RecordDataMsg()
 
 	// Send to sequencer
 	tob.mu.RLock()
@@ -206,9 +216,13 @@ func (tob *TOBroadcast) Broadcast(payload []byte) error {
 	} else {
 		// Send to remote sequencer
 		if sequencerAddr == "" {
-			return ErrNoSequencer
+			return fmt.Errorf("%w: sequencer address not configured", ErrNoSequencer)
 		}
-		return tob.transport.SendMessage(sequencerAddr, msg)
+		err := tob.transport.SendMessage(sequencerAddr, msg)
+		if err != nil {
+			return fmt.Errorf("failed to send to sequencer: %w", err)
+		}
+		return nil
 	}
 }
 
@@ -221,10 +235,6 @@ func (tob *TOBroadcast) handleMessage(msg *Message) {
 		tob.handleSequencedMessage(msg)
 	case HeartbeatMsg:
 		tob.handleHeartbeat(msg)
-	case SequencerElectionMsg:
-		tob.handleSequencerElection(msg)
-	case SequencerAnnouncementMsg:
-		tob.handleSequencerAnnouncement(msg)
 	default:
 		tob.config.Logger.Warnf("[TOB] Unknown message type: %v", msg.Type)
 	}
@@ -246,7 +256,7 @@ func (tob *TOBroadcast) handleDataMessage(msg *Message) {
 }
 
 // handleSequencedMessage handles a sequenced message from the sequencer
-// Paper: "When a process receives a message with sequence number s,
+// Paper (Section 4.1): "When a process receives a message with sequence number s,
 // it holds the message until it has delivered all messages with sequence numbers less than s"
 func (tob *TOBroadcast) handleSequencedMessage(msg *Message) {
 	tob.config.Logger.Debugf("[TOB] Received sequenced message %s with seq=%d from %s",
@@ -256,16 +266,25 @@ func (tob *TOBroadcast) handleSequencedMessage(msg *Message) {
 	tob.delivery.AddSequencedMessage(msg)
 }
 
-// multicastSequencedMessage multicasts a sequenced message to all nodes
-// Paper: "The sequencer multicasts the message along with its sequence number to all processes"
+// multicastSequencedMessage sends sequenced message to all processes
+// Paper (Section 4.1): "The sequencer multicasts the message along with its sequence number to all processes"
+// Implementation: Uses multiple unicast sends (standard practice since true IP multicast is rarely available)
+// Optimization: Sequencer delivers to itself locally without network overhead
 func (tob *TOBroadcast) multicastSequencedMessage(msg *Message) {
-	tob.config.Logger.Debugf("[TOB] Multicasting sequenced message %s (seq=%d) to all nodes",
+	tob.config.Logger.Debugf("[TOB] Sending sequenced message %s (seq=%d) to all processes",
 		msg.MessageID, msg.SequenceNumber)
 
-	// Send to all nodes (including self)
+	// Deliver to self locally (optimization: bypass network)
+	if tob.isSequencer {
+		tob.delivery.AddSequencedMessage(msg)
+	}
+
+	// Send to all other nodes
 	for _, nodeAddr := range tob.config.Nodes {
-		if err := tob.transport.SendMessage(nodeAddr, msg); err != nil {
-			tob.config.Logger.Errorf("[TOB] Failed to multicast to %s: %v", nodeAddr, err)
+		if nodeAddr != tob.config.AdvertiseAddr {
+			if err := tob.transport.SendMessage(nodeAddr, msg); err != nil {
+				tob.config.Logger.Errorf("[TOB] Failed to send to %s: %v", nodeAddr, err)
+			}
 		}
 	}
 }
@@ -280,7 +299,7 @@ func (tob *TOBroadcast) handleHeartbeat(msg *Message) {
 }
 
 // monitorSequencer monitors the sequencer for failures
-// Paper: "The sequencer must be monitored; if it fails, a new sequencer must be elected"
+// The paper's Fixed Sequencer (Section 4.1) does not include failure handling; see Moving Sequencer (Section 4.2).
 func (tob *TOBroadcast) monitorSequencer() {
 	defer tob.wg.Done()
 
@@ -311,110 +330,9 @@ func (tob *TOBroadcast) checkSequencerHealth() {
 	timeSinceHeartbeat := time.Since(lastHB)
 
 	if timeSinceHeartbeat > tob.config.SequencerTimeout {
-		tob.config.Logger.Warnf("[TOB] Sequencer timeout detected (last heartbeat: %v ago)", timeSinceHeartbeat)
-
-		if tob.config.EnableSequencerFailover {
-			tob.handleSequencerFailure()
-		}
+		// Sequencer is fixed for a run. If it fails, ordering stops.
+		tob.config.Logger.Errorf("[TOB] Sequencer is unreachable (last heartbeat: %v ago). Ordering has stopped. Manual intervention required.", timeSinceHeartbeat)
 	}
-}
-
-// handleSequencerFailure handles sequencer failure and initiates election
-// Paper: "When the sequencer fails, a new sequencer must be elected"
-func (tob *TOBroadcast) handleSequencerFailure() {
-	tob.mu.Lock()
-	defer tob.mu.Unlock()
-
-	tob.config.Logger.Warnf("[TOB] Sequencer failure detected, initiating election")
-
-	// Simple election: highest priority (or lowest ID) becomes sequencer
-	// In production, could use a more sophisticated election algorithm
-	if tob.shouldBecomeSequencer() {
-		tob.becomeSequencer()
-	}
-}
-
-// shouldBecomeSequencer determines if this node should become the sequencer
-func (tob *TOBroadcast) shouldBecomeSequencer() bool {
-	// Simple heuristic: node with highest priority
-	// Could be enhanced with Bully algorithm or other election protocols
-	return true // Simplified for this implementation
-}
-
-// becomeSequencer promotes this node to be the sequencer
-func (tob *TOBroadcast) becomeSequencer() {
-	tob.config.Logger.Infof("[TOB] Becoming the new sequencer")
-
-	oldSequencer := tob.currentSequencer
-
-	tob.isSequencer = true
-	tob.currentSequencer = tob.config.NodeID
-	tob.sequencerAddr = tob.config.AdvertiseAddr
-
-	// Create and start sequencer
-	if tob.sequencer == nil {
-		tob.sequencer = NewSequencer(tob)
-	}
-	tob.sequencer.Start()
-
-	// Announce to all nodes
-	tob.announceNewSequencer()
-
-	// Notify callback
-	if tob.sequencerChangeCallback != nil {
-		tob.sequencerChangeCallback(oldSequencer, tob.config.NodeID)
-	}
-
-	tob.stats.IncrementSequencerChanges()
-}
-
-// announceNewSequencer announces this node as the new sequencer
-func (tob *TOBroadcast) announceNewSequencer() {
-	msg := &Message{
-		Type:              SequencerAnnouncementMsg,
-		From:              tob.config.NodeID,
-		FromAddr:          tob.config.AdvertiseAddr,
-		ProposedSequencer: tob.config.NodeID,
-		Timestamp:         time.Now(),
-	}
-
-	for _, nodeAddr := range tob.config.Nodes {
-		if nodeAddr != tob.config.AdvertiseAddr {
-			if err := tob.transport.SendMessage(nodeAddr, msg); err != nil {
-				tob.config.Logger.Errorf("[TOB] Failed to announce new sequencer to %s: %v", nodeAddr, err)
-			}
-		}
-	}
-}
-
-// handleSequencerElection handles a sequencer election message
-func (tob *TOBroadcast) handleSequencerElection(msg *Message) {
-	tob.config.Logger.Infof("[TOB] Received sequencer election message from %s", msg.From)
-	// Election protocol implementation
-}
-
-// handleSequencerAnnouncement handles a sequencer announcement
-func (tob *TOBroadcast) handleSequencerAnnouncement(msg *Message) {
-	tob.config.Logger.Infof("[TOB] New sequencer announced: %s", msg.ProposedSequencer)
-
-	tob.mu.Lock()
-	defer tob.mu.Unlock()
-
-	oldSequencer := tob.currentSequencer
-	tob.currentSequencer = msg.ProposedSequencer
-	tob.sequencerAddr = msg.FromAddr
-
-	// Reset heartbeat timer
-	tob.heartbeatMu.Lock()
-	tob.lastHeartbeat = time.Now()
-	tob.heartbeatMu.Unlock()
-
-	// Notify callback
-	if tob.sequencerChangeCallback != nil {
-		tob.sequencerChangeCallback(oldSequencer, msg.ProposedSequencer)
-	}
-
-	tob.stats.IncrementSequencerChanges()
 }
 
 // SetDeliveryCallback sets the callback for message delivery
@@ -424,16 +342,16 @@ func (tob *TOBroadcast) SetDeliveryCallback(callback DeliveryCallback) {
 	tob.deliveryCallback = callback
 }
 
-// SetSequencerChangeCallback sets the callback for sequencer changes
-func (tob *TOBroadcast) SetSequencerChangeCallback(callback SequencerChangeCallback) {
-	tob.mu.Lock()
-	defer tob.mu.Unlock()
-	tob.sequencerChangeCallback = callback
+// GetMetrics returns performance metrics
+func (tob *TOBroadcast) GetMetrics() *Metrics {
+	return tob.metrics
 }
 
-// GetStatistics returns protocol statistics
-func (tob *TOBroadcast) GetStatistics() *Statistics {
-	return tob.stats
+// SetMetrics sets a shared metrics collector (for benchmarking)
+func (tob *TOBroadcast) SetMetrics(metrics *Metrics) {
+	tob.mu.Lock()
+	defer tob.mu.Unlock()
+	tob.metrics = metrics
 }
 
 // IsSequencer returns whether this node is the current sequencer
@@ -448,6 +366,21 @@ func (tob *TOBroadcast) GetCurrentSequencer() string {
 	tob.mu.RLock()
 	defer tob.mu.RUnlock()
 	return tob.currentSequencer
+}
+
+// IsSequencerReachable checks if the sequencer is currently reachable
+// Returns false if sequencer timeout has been exceeded
+func (tob *TOBroadcast) IsSequencerReachable() bool {
+	if tob.IsSequencer() {
+		return true // We are the sequencer
+	}
+
+	tob.heartbeatMu.RLock()
+	lastHB := tob.lastHeartbeat
+	tob.heartbeatMu.RUnlock()
+
+	timeSinceHeartbeat := time.Since(lastHB)
+	return timeSinceHeartbeat <= tob.config.SequencerTimeout
 }
 
 // GetNextExpectedSequence returns the next expected sequence number
