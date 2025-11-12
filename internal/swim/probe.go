@@ -114,6 +114,8 @@ func (ps *ProbeScheduler) sendPing(target *Member, seqNo uint64) {
 
 	if err := ps.swim.transport.SendMessage(target.Address, msg); err != nil {
 		ps.swim.config.Logger.Errorf("[Probe] Error sending ping to %s: %v", target.ID, err)
+	} else if ps.swim.metrics != nil {
+		ps.swim.metrics.RecordPing()
 	}
 }
 
@@ -172,6 +174,8 @@ func (ps *ProbeScheduler) sendPingReq(node *Member, ctx *probeContext) {
 
 	if err := ps.swim.transport.SendMessage(node.Address, msg); err != nil {
 		ps.swim.config.Logger.Errorf("[Probe] Error sending ping-req to %s: %v", node.ID, err)
+	} else if ps.swim.metrics != nil {
+		ps.swim.metrics.RecordPingReq()
 	}
 }
 
@@ -199,10 +203,17 @@ func (ps *ProbeScheduler) handleProbeFailed(ctx *probeContext) {
 	}
 
 	if ps.swim.config.EnableSuspicionMechanism {
-		// Mark as suspect instead of immediately failed
-		// Section 4.2: "Suspicion mechanism... allows us to achieve low false positive rate"
-		ps.swim.config.Logger.Infof("[SWIM] Marking member %s as SUSPECT", ctx.targetID)
-		ps.swim.handleSuspicion(member)
+		// Only mark as suspect if not already suspected or failed
+		// This prevents recording multiple suspicions for the same failure
+		if member.Status == Alive {
+			// Mark as suspect instead of immediately failed
+			// Section 4.2: "Suspicion mechanism... allows us to achieve low false positive rate"
+			ps.swim.config.Logger.Infof("[SWIM] Marking member %s as SUSPECT (from probe failure)", ctx.targetID)
+			ps.swim.handleSuspicion(member)
+		} else {
+			ps.swim.config.Logger.Debugf("[SWIM] Probe failed for %s but already in status %v, not recording suspicion", ctx.targetID, member.Status)
+		}
+		// If already Suspect or Failed, ignore the probe failure (already handled)
 	} else {
 		// Without suspicion, mark directly as failed
 		ps.swim.config.Logger.Infof("[SWIM] Marking member %s as FAILED", ctx.targetID)
@@ -236,6 +247,11 @@ func (ps *ProbeScheduler) HandleAck(msg *Message) {
 
 	latency := time.Since(ctx.startTime)
 	ps.swim.config.Logger.Debugf("[SWIM] Received ACK from %s (seq=%d, latency=%v)", msg.From, msg.SeqNo, latency)
+
+	// Record probe latency
+	if ps.swim.metrics != nil {
+		ps.swim.metrics.RecordProbeLatency(latency)
+	}
 
 	// Update member status to alive if it was suspect
 	member, exists := ps.swim.memberList.GetMember(msg.From)
