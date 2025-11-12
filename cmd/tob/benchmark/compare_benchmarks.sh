@@ -84,28 +84,3 @@ for SIZE in 3 5 7 9; do
         "${SIZE} nodes" "$P50" "$P95" "$P99" "$THROUGHPUT" "$MSGS_PER_NODE" "$SEQ_LATENCY"
 done
 
-echo ""
-echo "========================================="
-echo "NFR ANALYSIS"
-echo "========================================="
-echo ""
-echo "NFR1 - Performance (Latency):"
-echo "  - P50: Median latency for message delivery"
-echo "  - P95: 95th percentile latency"
-echo "  - P99: 99th percentile latency"
-echo "  Lower values = better performance"
-echo ""
-echo "NFR2 - Scalability (Throughput & Load):"
-echo "  - Throughput: Messages delivered per second"
-echo "  - Msgs/Node: Average message load per node"
-echo "  - Seq Latency: Time for sequencer to process messages"
-echo "  Watch for degradation as cluster size increases"
-echo ""
-echo "Expected Behavior:"
-echo "  - Latency should remain relatively stable"
-echo "  - Message load should increase with cluster size"
-echo "  - Throughput depends on sequencer bottleneck"
-echo ""
-
-echo "========================================="
-
