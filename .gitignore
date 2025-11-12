@@ -32,3 +32,5 @@ go.work.sum
 # .vscode/
 # The BBolt DB data dir
 data/
+# Benchmarks saved from running protocols
+benchmarks/
