@@ -109,21 +109,21 @@ func (gm *GossipManager) cleanupTransmittedUpdates() {
 	gm.updates = newUpdates
 }
 
-// ProcessIncomingUpdates processes updates received from other members
+// ProcessIncomingUpdates processes updates from piggybacked gossip
 // Section 4.4: "disseminate membership updates... piggybacking on ping and ack messages"
-func (gm *GossipManager) ProcessIncomingUpdates(updates []Update, memberList *MemberList, onUpdate func(Update)) {
+func (gm *GossipManager) ProcessIncomingUpdates(updates []Update, memberList *MemberList, onUpdate func(Update, MemberStatus)) {
 	for _, update := range updates {
-		// Try to apply the update to our membership list
-		changed := memberList.AddMember(update.MemberID, update.Address, update.Status, update.Incarnation)
+		// Try to apply the update to our membership list, getting the old status
+		changed, oldStatus := memberList.AddMember(update.MemberID, update.Address, update.Status, update.Incarnation)
 
 		if changed {
 			// If this is new information, queue it for further gossip
 			// Section 5: "infection-style dissemination ensures that membership updates are reliably propagated"
 			gm.AddUpdate(update)
 
-			// Notify about the update
+			// Notify about the update with old status
 			if onUpdate != nil {
-				onUpdate(update)
+				onUpdate(update, oldStatus)
 			}
 		}
 	}

@@ -31,8 +31,8 @@ func NewMemberList(localID, localAddr string) *MemberList {
 }
 
 // AddMember adds or updates a member in the list
-// Returns true if this is a new member or status changed
-func (ml *MemberList) AddMember(id, addr string, status MemberStatus, incarnation uint64) bool {
+// Returns (changed, oldStatus) where changed indicates if member was added/updated, oldStatus is previous status
+func (ml *MemberList) AddMember(id, addr string, status MemberStatus, incarnation uint64) (bool, MemberStatus) {
 	ml.mu.Lock()
 	defer ml.mu.Unlock()
 
@@ -45,8 +45,10 @@ func (ml *MemberList) AddMember(id, addr string, status MemberStatus, incarnatio
 			Incarnation: incarnation,
 			LocalTime:   time.Now(),
 		}
-		return true
+		return true, 0 // No old status for new member
 	}
+
+	oldStatus := existing.Status
 
 	// Section 4.3: "incarnation number is a sequence counter... used in refuting false suspicions"
 	// Only update if incarnation is higher, or same incarnation with status priority
@@ -54,18 +56,18 @@ func (ml *MemberList) AddMember(id, addr string, status MemberStatus, incarnatio
 		existing.Incarnation = incarnation
 		existing.Status = status
 		existing.LocalTime = time.Now()
-		return true
+		return true, oldStatus
 	} else if incarnation == existing.Incarnation {
 		// Status priority: Alive > Suspect > Failed > Left
 		// This ensures newer information overwrites older
 		if shouldOverride(existing.Status, status) {
 			existing.Status = status
 			existing.LocalTime = time.Now()
-			return true
+			return true, oldStatus
 		}
 	}
 
-	return false
+	return false, oldStatus
 }
 
 // shouldOverride determines if newStatus should override oldStatus
