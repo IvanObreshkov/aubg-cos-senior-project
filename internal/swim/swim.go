@@ -15,10 +15,12 @@ type SWIM struct {
 	gossip     *GossipManager
 	transport  Transport
 	probe      *ProbeScheduler
+	metrics    *Metrics
 
 	suspectTimers sync.Map // map[memberID]*time.Timer
 
 	shutdownCh chan struct{}
+	stopped    bool // Track if already stopped/crashed
 	wg         sync.WaitGroup
 
 	// Event callbacks
@@ -56,6 +58,7 @@ func New(config *Config) (*SWIM, error) {
 		gossip:     gossip,
 		transport:  transport,
 		shutdownCh: make(chan struct{}),
+		metrics:    NewMetrics(),
 	}
 
 	// Create probe scheduler
@@ -115,6 +118,14 @@ func (s *SWIM) Start() error {
 
 // Stop stops the SWIM protocol
 func (s *SWIM) Stop() error {
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return nil // Already stopped
+	}
+	s.stopped = true
+	s.mu.Unlock()
+
 	s.config.Logger.Infof("[SWIM] Stopping SWIM node %s", s.config.NodeID)
 
 	// Announce voluntary leave
@@ -131,6 +142,35 @@ func (s *SWIM) Stop() error {
 	s.wg.Wait()
 
 	s.config.Logger.Infof("[SWIM] SWIM node stopped")
+	return nil
+}
+
+// Crash simulates an ungraceful node failure (no leave notification sent)
+// This is useful for testing failure detection in benchmarks
+func (s *SWIM) Crash() error {
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return nil // Already stopped
+	}
+	s.stopped = true
+	s.mu.Unlock()
+
+	s.config.Logger.Warnf("[SWIM] Crashing SWIM node %s (simulated)", s.config.NodeID)
+
+	// DO NOT announce leave - this simulates a real crash
+	// Other nodes will detect via probe timeouts and mark as Suspect → Failed
+
+	// Stop components immediately
+	s.probe.Stop()
+	close(s.shutdownCh)
+	if err := s.transport.Stop(); err != nil {
+		s.config.Logger.Errorf("[SWIM] Error stopping transport: %v", err)
+	}
+
+	s.wg.Wait()
+
+	s.config.Logger.Warnf("[SWIM] SWIM node crashed")
 	return nil
 }
 
@@ -233,11 +273,16 @@ func (s *SWIM) performMaintenance() {
 
 // handleMessage handles incoming SWIM protocol messages
 func (s *SWIM) handleMessage(msg *Message) {
+	// Record incoming message
+	if s.metrics != nil {
+		s.metrics.RecordMessageIn()
+	}
+
 	// Process piggybacked updates first
 	// Section 4.4: "Updates are sent via piggybacking"
 	if len(msg.Piggyback) > 0 {
-		s.gossip.ProcessIncomingUpdates(msg.Piggyback, s.memberList, func(update Update) {
-			s.handleMembershipUpdate(update)
+		s.gossip.ProcessIncomingUpdates(msg.Piggyback, s.memberList, func(update Update, oldStatus MemberStatus) {
+			s.handleMembershipUpdate(update, oldStatus)
 		})
 	}
 
@@ -276,7 +321,7 @@ func (s *SWIM) handlePing(msg *Message) {
 	s.config.Logger.Debugf("[SWIM] Received ping from %s (seq=%d)", msg.From, msg.SeqNo)
 
 	// Update member info if needed
-	s.memberList.AddMember(msg.From, msg.FromAddr, Alive, msg.Incarnation)
+	s.memberList.AddMember(msg.From, msg.FromAddr, Alive, msg.Incarnation) // Ignore return values
 
 	// Send ACK
 	ackMsg := &Message{
@@ -292,6 +337,8 @@ func (s *SWIM) handlePing(msg *Message) {
 
 	if err := s.transport.SendMessage(msg.FromAddr, ackMsg); err != nil {
 		s.config.Logger.Errorf("[SWIM] Error sending ACK to %s: %v", msg.From, err)
+	} else if s.metrics != nil {
+		s.metrics.RecordAck()
 	}
 }
 
@@ -330,7 +377,7 @@ func (s *SWIM) handleIndirectPing(msg *Message) {
 	s.config.Logger.Debugf("[SWIM] Received indirect ping from %s (seq=%d)", msg.From, msg.SeqNo)
 
 	// Update member info
-	s.memberList.AddMember(msg.From, msg.FromAddr, Alive, msg.Incarnation)
+	s.memberList.AddMember(msg.From, msg.FromAddr, Alive, msg.Incarnation) // Ignore return values
 
 	// Send indirect ACK back to the original requester (not the intermediary)
 	// But we need to know who the original requester is - this should be in the message
@@ -402,7 +449,8 @@ func (s *SWIM) handleJoinMsg(msg *Message) {
 	s.config.Logger.Infof("[SWIM] Member %s is joining from %s", msg.From, msg.FromAddr)
 
 	// Add the new member
-	if s.memberList.AddMember(msg.From, msg.FromAddr, Alive, msg.Incarnation) {
+	changed, _ := s.memberList.AddMember(msg.From, msg.FromAddr, Alive, msg.Incarnation)
+	if changed {
 		member := s.getMember(msg.From)
 		if member != nil && s.onMemberJoin != nil {
 			s.onMemberJoin(member)
@@ -479,13 +527,15 @@ func (s *SWIM) handleSyncMsg(msg *Message) {
 }
 
 // handleMembershipUpdate handles a membership update from gossip
-func (s *SWIM) handleMembershipUpdate(update Update) {
+// oldStatus is the status before this update was applied
+func (s *SWIM) handleMembershipUpdate(update Update, oldStatus MemberStatus) {
 	member := s.getMember(update.MemberID)
 	if member == nil {
 		return
 	}
 
-	oldStatus := member.Status
+	// Use the passed oldStatus parameter instead of reading from member
+	// (member status has already been updated by AddMember)
 
 	switch update.Status {
 	case Alive:
@@ -493,8 +543,25 @@ func (s *SWIM) handleMembershipUpdate(update Update) {
 			s.cancelSuspectTimer(member.ID)
 		}
 	case Suspect:
+		// When receiving suspicion via gossip, just update our view
+		// Don't call handleSuspicion (which records metrics and starts timer)
+		// because that's only for LOCAL detections (probe failures)
+		// The suspicion was already recorded by the node that detected it
 		if oldStatus == Alive {
-			s.handleSuspicion(member)
+			s.config.Logger.Debugf("[SWIM] Learned about suspicion of %s via gossip (Alive→Suspect)", update.MemberID)
+
+			// Cancel any existing timer and start suspicion timer
+			s.cancelSuspectTimer(member.ID)
+
+			clusterSize := s.memberList.NumMembers()
+			suspicionTimeout := s.calculateSuspicionTimeout(clusterSize)
+
+			timer := time.AfterFunc(suspicionTimeout, func() {
+				s.handleSuspicionTimeout(member.ID)
+			})
+			s.suspectTimers.Store(member.ID, timer)
+		} else {
+			s.config.Logger.Debugf("[SWIM] Ignoring gossip: %s already in status %v, not Alive", update.MemberID, oldStatus)
 		}
 	case Failed:
 		s.handleFailure(member)
@@ -516,7 +583,24 @@ func (s *SWIM) handleSuspicion(member *Member) {
 		return
 	}
 
+	// Don't record suspicions if we're already stopped (during crash)
+	s.mu.RLock()
+	stopped := s.stopped
+	s.mu.RUnlock()
+	if stopped {
+		return
+	}
+
 	s.config.Logger.Warnf("[SWIM] Suspecting member %s", member.ID)
+
+	// Update member status immediately to prevent duplicate suspicions
+	// from probe failures and gossip happening concurrently
+	s.memberList.UpdateMemberStatus(member.ID, Suspect, member.Incarnation)
+
+	// Record suspicion
+	if s.metrics != nil {
+		s.metrics.RecordSuspicion()
+	}
 
 	// Cancel any existing suspect timer
 	s.cancelSuspectTimer(member.ID)
@@ -727,4 +811,18 @@ func (s *SWIM) OnMemberUpdate(callback func(*Member)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onMemberUpdate = callback
+}
+
+// SetMetrics sets a custom metrics collector
+func (s *SWIM) SetMetrics(metrics *Metrics) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.metrics = metrics
+}
+
+// GetMetrics returns the metrics collector
+func (s *SWIM) GetMetrics() *Metrics {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.metrics
 }
