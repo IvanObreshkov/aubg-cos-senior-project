@@ -9,9 +9,11 @@ import (
 
 // KVStateMachine is a simple key-value store that implements the StateMachine interface
 type KVStateMachine struct {
-	mu    sync.RWMutex
+	mu sync.RWMutex
+	// In-memory KV store
 	store map[string]string
-	id    string // Server ID for logging
+	// Server ID for logging
+	id string
 }
 
 // NewKVStateMachine creates a new key-value state machine
@@ -67,4 +69,25 @@ func (kv *KVStateMachine) Apply(logs []proto.LogEntry) {
 				kv.id, command, entry.Index)
 		}
 	}
+}
+
+// Get retrieves a value from the state machine
+func (kv *KVStateMachine) Get(key string) (string, bool) {
+	kv.mu.RLock()
+	defer kv.mu.RUnlock()
+	value, ok := kv.store[key]
+	return value, ok
+}
+
+// GetAll returns a copy of all key-value pairs in the state machine
+func (kv *KVStateMachine) GetAll() map[string]string {
+	kv.mu.RLock()
+	defer kv.mu.RUnlock()
+
+	// Return a copy to avoid concurrent modification
+	result := make(map[string]string, len(kv.store))
+	for k, v := range kv.store {
+		result[k] = v
+	}
+	return result
 }
