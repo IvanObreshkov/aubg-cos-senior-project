@@ -1,5 +1,7 @@
 package server
 
+import "time"
+
 import (
 	"aubg-cos-senior-project/internal/pubsub"
 )
@@ -58,4 +60,15 @@ type VoteGrantedPayload struct {
 	From ServerID
 	// The Term we received the vote for
 	Term uint64
+}
+
+// MetricsCollector is an optional interface for collecting performance metrics
+type MetricsCollector interface {
+	RecordCommandLatency(latency time.Duration)
+	RecordCommandCommitted()
+	RecordAppendEntries()
+	RecordRequestVote()
+	RecordHeartbeat()
+	RecordElection()
+	RecordElectionDuration(duration time.Duration)
 }
