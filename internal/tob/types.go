@@ -13,14 +13,8 @@ const (
 	DataMsg MessageType = iota
 	// SequencedMsg is a message with an assigned sequence number from the sequencer
 	SequencedMsg
-	// AckMsg acknowledges receipt of a sequenced message
-	AckMsg
-	// HeartbeatMsg is sent by sequencer to detect failures
+	// HeartbeatMsg is sent by sequencer for failure detection (implementation extension)
 	HeartbeatMsg
-	// SequencerElectionMsg is used during sequencer election
-	SequencerElectionMsg
-	// SequencerAnnouncementMsg announces the new sequencer
-	SequencerAnnouncementMsg
 )
 
 func (m MessageType) String() string {
@@ -29,21 +23,15 @@ func (m MessageType) String() string {
 		return "Data"
 	case SequencedMsg:
 		return "Sequenced"
-	case AckMsg:
-		return "Ack"
 	case HeartbeatMsg:
 		return "Heartbeat"
-	case SequencerElectionMsg:
-		return "SequencerElection"
-	case SequencerAnnouncementMsg:
-		return "SequencerAnnouncement"
 	default:
 		return "Unknown"
 	}
 }
 
 // Message represents a Total Order Broadcast message
-// Paper: "Fixed Sequencer algorithm: a centralized process (the sequencer)
+// Paper (Section 4.1): "Fixed Sequencer algorithm: a centralized process (the sequencer)
 // assigns a sequence number to each message"
 type Message struct {
 	Type           MessageType
@@ -53,10 +41,6 @@ type Message struct {
 	MessageID      string    // Unique message identifier
 	Payload        []byte    // Application data
 	Timestamp      time.Time // Message timestamp
-
-	// For sequencer election
-	ProposedSequencer string
-	ProposedPriority  int
 }
 
 // DeliveryStatus represents the state of a message in the delivery pipeline
@@ -106,7 +90,7 @@ type Config struct {
 	AdvertiseAddr string
 
 	// IsSequencer indicates if this node is the initial sequencer
-	// Paper: "Fixed Sequencer: one process is designated as the sequencer"
+	// Paper (Section 4.1): "Fixed Sequencer: one process is designated as the sequencer"
 	IsSequencer bool
 
 	// SequencerAddr is the address of the current sequencer
@@ -125,17 +109,11 @@ type Config struct {
 	HeartbeatInterval time.Duration
 
 	// DeliveryBufferSize is the size of the delivery buffer
-	// Paper: "Messages are delivered in sequence number order"
+	// Paper (Section 4.1): "Messages are delivered in sequence number order"
 	DeliveryBufferSize int
 
 	// MessageTimeout is how long to wait for message delivery
 	MessageTimeout time.Duration
-
-	// EnableSequencerFailover enables automatic sequencer election
-	EnableSequencerFailover bool
-
-	// SequencerPriority is used during election (higher = preferred)
-	SequencerPriority int
 
 	// Logger for debugging
 	Logger Logger
@@ -144,13 +122,11 @@ type Config struct {
 // DefaultConfig returns a Config with sensible default values
 func DefaultConfig() *Config {
 	return &Config{
-		SequencerTimeout:        5 * time.Second,
-		HeartbeatInterval:       1 * time.Second,
-		DeliveryBufferSize:      1000,
-		MessageTimeout:          10 * time.Second,
-		EnableSequencerFailover: true,
-		SequencerPriority:       0,
-		Logger:                  &defaultLogger{},
+		SequencerTimeout:   5 * time.Second,
+		HeartbeatInterval:  1 * time.Second,
+		DeliveryBufferSize: 1000,
+		MessageTimeout:     10 * time.Second,
+		Logger:             &defaultLogger{},
 	}
 }
 
@@ -171,87 +147,6 @@ func (l *defaultLogger) Warnf(_ string, _ ...interface{})  {}
 func (l *defaultLogger) Errorf(_ string, _ ...interface{}) {}
 
 // DeliveryCallback is called when a message is delivered in total order
-// Paper: "The algorithm guarantees that all correct processes deliver
+// Paper (Section 4.1): "The algorithm guarantees that all correct processes deliver
 // messages in the same order"
 type DeliveryCallback func(message *Message)
-
-// SequencerChangeCallback is called when the sequencer changes
-type SequencerChangeCallback func(oldSequencer, newSequencer string)
-
-// Statistics tracks protocol metrics
-type Statistics struct {
-	MessagesSent      uint64
-	MessagesDelivered uint64
-	MessagesDropped   uint64
-	AverageLatency    time.Duration
-	SequencerChanges  uint64
-	mu                sync.RWMutex
-}
-
-// GetMessagesSent returns the number of messages sent
-func (s *Statistics) GetMessagesSent() uint64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.MessagesSent
-}
-
-// GetMessagesDelivered returns the number of messages delivered
-func (s *Statistics) GetMessagesDelivered() uint64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.MessagesDelivered
-}
-
-// GetMessagesDropped returns the number of messages dropped
-func (s *Statistics) GetMessagesDropped() uint64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.MessagesDropped
-}
-
-// GetSequencerChanges returns the number of sequencer changes
-func (s *Statistics) GetSequencerChanges() uint64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.SequencerChanges
-}
-
-// IncrementMessagesSent increments the messages sent counter
-func (s *Statistics) IncrementMessagesSent() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.MessagesSent++
-}
-
-// IncrementMessagesDelivered increments the messages delivered counter
-func (s *Statistics) IncrementMessagesDelivered() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.MessagesDelivered++
-}
-
-// IncrementMessagesDropped increments the messages dropped counter
-func (s *Statistics) IncrementMessagesDropped() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.MessagesDropped++
-}
-
-// IncrementSequencerChanges increments the sequencer changes counter
-func (s *Statistics) IncrementSequencerChanges() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.SequencerChanges++
-}
-
-// UpdateAverageLatency updates the average latency metric
-func (s *Statistics) UpdateAverageLatency(latency time.Duration) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// Simple moving average
-	if s.AverageLatency == 0 {
-		s.AverageLatency = latency
-	} else {
-		s.AverageLatency = (s.AverageLatency + latency) / 2
-	}
-}
