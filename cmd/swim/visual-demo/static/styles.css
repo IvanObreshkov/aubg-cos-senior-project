@@ -1,0 +1,363 @@
+/* SWIM Visual Demo - Main Styles */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    padding: 20px;
+    min-height: 100vh;
+}
+
+.container {
+    max-width: 1600px;
+    margin: 0 auto;
+}
+
+h1 {
+    color: white;
+    text-align: center;
+    margin-bottom: 20px;
+    font-size: 2em;
+    text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+}
+
+/* Control Panel */
+.control-panel {
+    background: white;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 25px;
+    box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+}
+
+.control-title {
+    font-size: 1.3em;
+    margin-bottom: 10px;
+    color: #333;
+    font-weight: bold;
+}
+
+.control-info {
+    color: #666;
+    font-size: 0.95em;
+    margin-bottom: 15px;
+}
+
+/* Status Messages */
+.status-message {
+    padding: 12px;
+    border-radius: 8px;
+    margin-top: 10px;
+    display: none;
+}
+
+.status-success {
+    background: #d1fae5;
+    color: #065f46;
+    border: 1px solid #10b981;
+}
+
+.status-error {
+    background: #fee2e2;
+    color: #991b1b;
+    border: 1px solid #ef4444;
+}
+
+/* Cluster Grid */
+.cluster-view {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 20px;
+    margin-bottom: 30px;
+}
+
+/* Node Card Styles */
+.node-card {
+    background: white;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+    transition: transform 0.3s ease;
+}
+
+.node-card:hover {
+    transform: translateY(-5px);
+}
+
+.node-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+    padding-bottom: 15px;
+    border-bottom: 2px solid #f0f0f0;
+}
+
+.node-name {
+    font-size: 1.3em;
+    font-weight: bold;
+    color: #333;
+}
+
+/* Node Status Badges */
+.node-status {
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 0.9em;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+
+.status-alive {
+    background: #10b981;
+    color: white;
+}
+
+.status-suspect {
+    background: #f59e0b;
+    color: white;
+}
+
+.status-failed {
+    background: #ef4444;
+    color: white;
+}
+
+.status-left {
+    background: #6b7280;
+    color: white;
+}
+
+/* Node Info */
+.node-info {
+    margin: 10px 0;
+}
+
+.info-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 0;
+    border-bottom: 1px solid #f0f0f0;
+    font-size: 0.9em;
+}
+
+.info-label {
+    color: #666;
+    font-weight: 500;
+}
+
+.info-value {
+    color: #333;
+    font-weight: bold;
+}
+
+/* Metrics Section */
+.metrics-section {
+    margin-top: 15px;
+    padding-top: 15px;
+    border-top: 2px solid #f0f0f0;
+}
+
+.metrics-title {
+    font-size: 0.95em;
+    color: #666;
+    margin-bottom: 10px;
+    font-weight: bold;
+}
+
+.metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+}
+
+.metric-item {
+    background: #f8f9fa;
+    padding: 8px;
+    border-radius: 6px;
+    font-size: 0.85em;
+}
+
+.metric-label {
+    color: #666;
+    font-size: 0.8em;
+}
+
+.metric-value {
+    color: #333;
+    font-weight: bold;
+    font-size: 1.1em;
+}
+
+/* Members List */
+.members-section {
+    margin-top: 15px;
+    padding-top: 15px;
+    border-top: 2px solid #f0f0f0;
+}
+
+.members-title {
+    font-size: 0.95em;
+    color: #666;
+    margin-bottom: 10px;
+    font-weight: bold;
+}
+
+.member-item {
+    background: #f8f9fa;
+    padding: 8px 10px;
+    margin: 4px 0;
+    border-radius: 6px;
+    font-size: 0.85em;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.member-info {
+    flex: 1;
+}
+
+.member-id {
+    font-weight: bold;
+    color: #333;
+}
+
+.member-address {
+    color: #666;
+    font-size: 0.85em;
+}
+
+.member-status {
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 0.75em;
+    font-weight: bold;
+}
+
+.member-status.alive {
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.member-status.suspect {
+    background: #fed7aa;
+    color: #92400e;
+}
+
+.member-status.failed {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+/* Events Section */
+.events-section {
+    margin-top: 15px;
+    padding-top: 15px;
+    border-top: 2px solid #f0f0f0;
+}
+
+.events-title {
+    font-size: 0.95em;
+    color: #666;
+    margin-bottom: 10px;
+    font-weight: bold;
+}
+
+.event-item {
+    background: #f8f9fa;
+    padding: 8px 10px;
+    margin: 4px 0;
+    border-radius: 6px;
+    font-size: 0.8em;
+    border-left: 3px solid #999;
+}
+
+/* Event Type Colors */
+.event-item.member-join {
+    border-left-color: #10b981;
+    background: #d1fae5;
+}
+
+.event-item.member-leave {
+    border-left-color: #6b7280;
+    background: #f3f4f6;
+}
+
+.event-item.member-failed {
+    border-left-color: #ef4444;
+    background: #fee2e2;
+}
+
+.event-item.member-update {
+    border-left-color: #f59e0b;
+    background: #fef3c7;
+}
+
+.event-item.node-crashed {
+    border-left-color: #dc2626;
+    background: #fecaca;
+}
+
+.event-type {
+    font-weight: bold;
+    font-size: 0.75em;
+    color: #667eea;
+    margin-bottom: 3px;
+    text-transform: uppercase;
+}
+
+.event-msg {
+    color: #555;
+    font-size: 0.85em;
+}
+
+.event-time {
+    color: #999;
+    font-size: 0.7em;
+    margin-top: 3px;
+}
+
+/* Crash Button */
+.crash-button {
+    margin-top: 15px;
+    width: 100%;
+    padding: 10px;
+    background: #ef4444;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background 0.3s ease;
+}
+
+.crash-button:hover {
+    background: #dc2626;
+}
+
+.crash-button:disabled {
+    background: #9ca3af;
+    cursor: not-allowed;
+}
+
+
+/* Refresh Indicator */
+.refresh-indicator {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: white;
+    padding: 10px 20px;
+    border-radius: 20px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    font-size: 0.9em;
+    color: #10b981;
+    font-weight: bold;
+}
+
