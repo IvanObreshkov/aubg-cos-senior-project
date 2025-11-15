@@ -165,5 +165,5 @@ func handleShutdownServer(w http.ResponseWriter, r *http.Request) {
 
 // serveHTML serves the main HTML page for the web UI.
 func serveHTML(w http.ResponseWriter, r *http.Request) {
-	http.ServeFile(w, r, "cmd/raft/visual-demo/static/index.html")
+	http.ServeFile(w, r, "cmd/raft/visual-demo/index.html")
 }
