@@ -461,3 +461,13 @@ func (m *Metrics) Reset() {
 	m.suspicionCount.Store(0)
 	m.startTime = time.Now()
 }
+
+// Simple getter methods for visual demo
+func (m *Metrics) GetPingCount() uint64        { return m.pingCount.Load() }
+func (m *Metrics) GetAckCount() uint64         { return m.ackCount.Load() }
+func (m *Metrics) GetPingReqCount() uint64     { return m.pingReqCount.Load() }
+func (m *Metrics) GetSuspectMsgCount() uint64  { return m.suspectMsgCount.Load() }
+func (m *Metrics) GetSuspicionCount() uint64   { return m.suspicionCount.Load() }
+func (m *Metrics) GetFailureCount() uint64     { return m.failureDetectionCount.Load() }
+func (m *Metrics) GetTotalMessagesIn() uint64  { return m.totalMessagesIn.Load() }
+func (m *Metrics) GetTotalMessagesOut() uint64 { return m.totalMessagesOut.Load() }
