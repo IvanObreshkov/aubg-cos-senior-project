@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Total Order Broadcast (Fixed Sequencer) Visualization</title>
+    <link rel="stylesheet" href="static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1>📨 Total Order Broadcast - Fixed Sequencer</h1>
+
+        <!-- Control Panel -->
+        <div class="control-panel">
+            <div class="control-title">📤 Broadcast a Message</div>
+            <form class="broadcast-form" onsubmit="submitBroadcast(event)">
+                <select id="nodeSelect" class="node-select">
+                    <option value="1">Node-1</option>
+                    <option value="2">Node-2</option>
+                    <option value="3">Node-3</option>
+                </select>
+                <input type="text" id="messageInput" class="message-input" placeholder="Enter message to broadcast..." required>
+                <button type="submit" class="btn btn-primary">Broadcast</button>
+            </form>
+
+            <div class="quick-broadcast-section">
+                <div class="quick-title">⚡ Quick Broadcast Demo (to see sequencing in action):</div>
+                <div class="quick-buttons">
+                    <button onclick="quickBroadcast()" class="btn btn-quick">Send 5 Messages from Different Nodes</button>
+                    <button onclick="rapidBroadcast()" class="btn btn-quick">Rapid Fire (10 messages)</button>
+                </div>
+            </div>
+
+            <div id="statusMessage" class="status-message"></div>
+        </div>
+
+        <!-- Cluster View -->
+        <div class="cluster-view" id="clusterView">
+            <!-- Node cards will be inserted here -->
+        </div>
+
+        <!-- Refresh Indicator -->
+        <div class="refresh-indicator" id="refreshIndicator">
+            ● Live
+        </div>
+    </div>
+
+    <script src="static/app.js"></script>
+</body>
+</html>
+
