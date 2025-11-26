@@ -30,6 +30,7 @@ type UDPTransport struct {
 	shutdownCh     chan struct{}
 	wg             sync.WaitGroup
 	logger         Logger
+	blocked        bool // For testing: drop all incoming messages when true
 }
 
 // NewUDPTransport creates a new UDP transport
@@ -119,7 +120,13 @@ func (t *UDPTransport) listen() {
 		// Handle message
 		t.mu.RLock()
 		handler := t.messageHandler
+		blocked := t.blocked
 		t.mu.RUnlock()
+
+		// Drop message if transport is blocked (for testing)
+		if blocked {
+			continue
+		}
 
 		if handler != nil {
 			handler(msg)
@@ -159,4 +166,18 @@ func (t *UDPTransport) SetMessageHandler(handler func(*Message)) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.messageHandler = handler
+}
+
+// BlockIncoming blocks all incoming messages (for testing network partitions)
+func (t *UDPTransport) BlockIncoming() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.blocked = true
+}
+
+// UnblockIncoming resumes processing incoming messages
+func (t *UDPTransport) UnblockIncoming() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.blocked = false
 }

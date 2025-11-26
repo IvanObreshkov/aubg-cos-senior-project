@@ -365,6 +365,11 @@ func (s *SWIM) handlePingReq(msg *Message) {
 		return
 	}
 
+	// Record the indirect ping metric
+	if s.metrics != nil {
+		s.metrics.RecordIndirectPing()
+	}
+
 	// Set timeout for indirect ping response
 	time.AfterFunc(s.config.ProbeTimeout, func() {
 		// If we haven't received an ack by now, we won't send anything back
@@ -529,6 +534,22 @@ func (s *SWIM) handleSyncMsg(msg *Message) {
 // handleMembershipUpdate handles a membership update from gossip
 // oldStatus is the status before this update was applied
 func (s *SWIM) handleMembershipUpdate(update Update, oldStatus MemberStatus) {
+	// Handle updates about the local node specially
+	// The local node is not in the members map, so handle refutation first
+	if update.MemberID == s.config.NodeID {
+		switch update.Status {
+		case Suspect:
+			// Section 4.3: "member voluntarily refutes... by multicasting an Alive message"
+			s.config.Logger.Infof("[SWIM] Learned via gossip that I'm suspected - refuting")
+			s.refuteSuspicion()
+		case Failed:
+			// Someone thinks we're failed - refute strongly
+			s.config.Logger.Warnf("[SWIM] Learned via gossip that I'm marked as failed - refuting")
+			s.refuteSuspicion()
+		}
+		return
+	}
+
 	member := s.getMember(update.MemberID)
 	if member == nil {
 		return
@@ -540,9 +561,26 @@ func (s *SWIM) handleMembershipUpdate(update Update, oldStatus MemberStatus) {
 	switch update.Status {
 	case Alive:
 		if oldStatus == Suspect {
+			// SWIM Paper Section 4.3: Node refuted suspicion (Suspect → Alive)
+			// This is a REFUTED SUSPICION, not a false positive
+			// False positive would be if a healthy node was marked Failed
 			s.cancelSuspectTimer(member.ID)
+			if s.metrics != nil {
+				s.metrics.RecordRefutedSuspicion()
+			}
+			s.config.Logger.Infof("[SWIM] Refuted suspicion: %s (Suspect→Alive)", update.MemberID)
+		} else if oldStatus == Failed {
+			// SWIM Paper: TRUE FALSE POSITIVE detected!
+			// A node previously marked Failed is now Alive, meaning it was a running process
+			// that was incorrectly declared dead (likely due to network partition)
+			s.cancelSuspectTimer(member.ID)
+			if s.metrics != nil {
+				s.metrics.RecordTrueFalsePositive()
+			}
+			s.config.Logger.Warnf("[SWIM] FALSE POSITIVE DETECTED: %s was marked Failed but is actually alive!", update.MemberID)
 		}
 	case Suspect:
+
 		// When receiving suspicion via gossip, just update our view
 		// Don't call handleSuspicion (which records metrics and starts timer)
 		// because that's only for LOCAL detections (probe failures)
@@ -668,8 +706,17 @@ func (s *SWIM) handleAlive(memberID string, incarnation uint64) {
 		return
 	}
 
+	// Check if this is a refutation (Suspect → Alive transition)
+	wasSuspect := member.Status == Suspect
+
 	if s.memberList.UpdateMemberStatus(memberID, Alive, incarnation) {
 		s.config.Logger.Infof("[SWIM] Member %s is alive (incarnation=%d)", memberID, incarnation)
+
+		// Record refuted suspicion if node was suspected and is now alive
+		if wasSuspect && s.metrics != nil {
+			s.metrics.RecordRefutedSuspicion()
+			s.config.Logger.Infof("[SWIM] Refuted suspicion: %s (Suspect→Alive)", memberID)
+		}
 
 		// Cancel suspect timer
 		s.cancelSuspectTimer(memberID)
@@ -699,6 +746,11 @@ func (s *SWIM) handleFailure(member *Member) {
 
 	// Update status
 	s.memberList.UpdateMemberStatus(member.ID, Failed, member.Incarnation)
+
+	// Record failure detection (without latency, since we don't track failure time)
+	if s.metrics != nil {
+		s.metrics.RecordFailureDetection(0) // 0 latency since we're not tracking timing here
+	}
 
 	// Notify callback
 	if s.onMemberFailed != nil {
@@ -825,4 +877,34 @@ func (s *SWIM) GetMetrics() *Metrics {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.metrics
+}
+
+// PauseProbes temporarily pauses outgoing probe messages
+// This is useful for testing false positive scenarios where a node appears unresponsive
+func (s *SWIM) PauseProbes() {
+	if s.probe != nil {
+		s.probe.Pause()
+	}
+}
+
+// ResumeProbes resumes outgoing probe messages after they were paused
+func (s *SWIM) ResumeProbes() {
+	if s.probe != nil {
+		s.probe.Resume()
+	}
+}
+
+// SimulateNetworkPartition blocks all incoming messages to simulate network isolation
+// This causes other nodes to suspect this node, which can then refute when unblocked
+func (s *SWIM) SimulateNetworkPartition() {
+	if udpTransport, ok := s.transport.(*UDPTransport); ok {
+		udpTransport.BlockIncoming()
+	}
+}
+
+// EndNetworkPartition resumes processing incoming messages
+func (s *SWIM) EndNetworkPartition() {
+	if udpTransport, ok := s.transport.(*UDPTransport); ok {
+		udpTransport.UnblockIncoming()
+	}
 }

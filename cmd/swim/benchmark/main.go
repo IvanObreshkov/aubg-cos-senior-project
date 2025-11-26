@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -38,6 +39,62 @@ func (l *SimpleLogger) Errorf(format string, args ...interface{}) {
 	log.Printf("[%s] ERROR: "+format, append([]interface{}{l.nodeID}, args...)...)
 }
 
+// GroundTruth maintains external knowledge of which nodes are actually alive
+// This helps verify false positive detection: if SWIM marks a node Failed but
+// GroundTruth knows it's alive, that's a true false positive per SWIM paper
+type GroundTruth struct {
+	mu          sync.RWMutex
+	aliveNodes  map[string]bool // nodeID -> is process actually running
+	partitioned map[string]bool // nodeID -> is currently network partitioned
+}
+
+func NewGroundTruth() *GroundTruth {
+	return &GroundTruth{
+		aliveNodes:  make(map[string]bool),
+		partitioned: make(map[string]bool),
+	}
+}
+
+func (gt *GroundTruth) MarkAlive(nodeID string) {
+	gt.mu.Lock()
+	defer gt.mu.Unlock()
+	gt.aliveNodes[nodeID] = true
+	gt.partitioned[nodeID] = false
+}
+
+func (gt *GroundTruth) MarkCrashed(nodeID string) {
+	gt.mu.Lock()
+	defer gt.mu.Unlock()
+	gt.aliveNodes[nodeID] = false
+	gt.partitioned[nodeID] = false
+}
+
+func (gt *GroundTruth) MarkPartitioned(nodeID string) {
+	gt.mu.Lock()
+	defer gt.mu.Unlock()
+	// Node is still alive (process running), just network isolated
+	gt.aliveNodes[nodeID] = true
+	gt.partitioned[nodeID] = true
+}
+
+func (gt *GroundTruth) EndPartition(nodeID string) {
+	gt.mu.Lock()
+	defer gt.mu.Unlock()
+	gt.partitioned[nodeID] = false
+}
+
+func (gt *GroundTruth) IsActuallyAlive(nodeID string) bool {
+	gt.mu.RLock()
+	defer gt.mu.RUnlock()
+	return gt.aliveNodes[nodeID]
+}
+
+func (gt *GroundTruth) IsPartitioned(nodeID string) bool {
+	gt.mu.RLock()
+	defer gt.mu.RUnlock()
+	return gt.partitioned[nodeID]
+}
+
 func main() {
 	// Parse command-line flags
 	clusterSize := flag.Int("cluster-size", 3, "Number of nodes in the cluster")
@@ -45,6 +102,7 @@ func main() {
 	outputFile := flag.String("output", "", "Output JSON file for metrics (optional)")
 	quiet := flag.Bool("quiet", false, "Reduce log verbosity")
 	withFailures := flag.Bool("with-failures", false, "Inject node failures during benchmark")
+	failureType := flag.String("failure-type", "partitions", "Type of failures: 'partitions' or 'crashstop'")
 	flag.Parse()
 
 	if *clusterSize < 3 {
@@ -58,7 +116,11 @@ func main() {
 	fmt.Printf("Cluster Size: %d nodes\n", *clusterSize)
 	fmt.Printf("Test Duration: %d seconds\n", *testDuration)
 	if *withFailures {
-		fmt.Println("Mode: WITH FAILURE INJECTION")
+		if *failureType == "crashstop" {
+			fmt.Println("Mode: CRASH-STOP FAILURES (Real node crashes)")
+		} else {
+			fmt.Println("Mode: NETWORK PARTITIONS (Temporary isolation)")
+		}
 	} else {
 		fmt.Println("Mode: STEADY-STATE OBSERVATION")
 	}
@@ -70,9 +132,17 @@ func main() {
 	// Create shared metrics collector
 	sharedMetrics := swim.NewMetrics()
 
+	// Create ground truth tracker (external knowledge of node states)
+	groundTruth := NewGroundTruth()
+
 	// Create cluster
 	fmt.Println("🚀 Creating cluster...")
 	nodes := createCluster(*clusterSize, basePort, sharedMetrics, *quiet)
+
+	// Mark all nodes as alive in ground truth
+	for _, node := range nodes {
+		groundTruth.MarkAlive(node.LocalNode().ID)
+	}
 
 	// Start all nodes
 	fmt.Println("🚀 Starting cluster...")
@@ -115,7 +185,7 @@ func main() {
 	fmt.Println()
 
 	if *withFailures {
-		runBenchmarkWithFailures(nodes, *testDuration, sharedMetrics)
+		runBenchmarkWithFailures(nodes, *testDuration, sharedMetrics, *failureType, groundTruth)
 	} else {
 		runBenchmark(nodes, *testDuration, sharedMetrics)
 	}
@@ -233,180 +303,56 @@ func runBenchmark(nodes []*swim.SWIM, durationSeconds int, metrics *swim.Metrics
 	}
 }
 
-// runBenchmarkWithFailures runs an active benchmark with injected failures
-// This measures failure detection latency and recovery behavior
-func runBenchmarkWithFailures(nodes []*swim.SWIM, durationSeconds int, metrics *swim.Metrics) {
+// runBenchmarkWithFailures routes to the appropriate failure injection benchmark
+func runBenchmarkWithFailures(nodes []*swim.SWIM, durationSeconds int, metrics *swim.Metrics, failureType string, groundTruth *GroundTruth) {
+	if failureType == "crashstop" {
+		runCrashStopBenchmark(nodes, durationSeconds, metrics, groundTruth)
+	} else {
+		runPartitionBenchmark(nodes, durationSeconds, metrics, groundTruth)
+	}
+}
+
+// runPartitionBenchmark measures false positive rate via network partitions
+func runPartitionBenchmark(nodes []*swim.SWIM, durationSeconds int, metrics *swim.Metrics, groundTruth *GroundTruth) {
 	startTime := time.Now()
 	duration := time.Duration(durationSeconds) * time.Second
 
-	fmt.Printf("Running for %d seconds WITH FAILURE INJECTION...\n", durationSeconds)
-	fmt.Println("📊 This measures FAILURE DETECTION performance:")
-	fmt.Println("   - How long to detect a failed node?")
-	fmt.Println("   - What's the false positive rate?")
-	fmt.Println("   - How fast do nodes rejoin?")
+	fmt.Printf("Running for %d seconds with NETWORK PARTITIONS...\n", durationSeconds)
+	fmt.Println("📊 This measures TRUE FALSE POSITIVE RATE (per SWIM paper):")
+	fmt.Println("   - Healthy processes (running) incorrectly marked as Failed")
+	fmt.Println("   - Partition duration: 10s (exceeds 5s timeout → triggers Failed state)")
+	fmt.Println("   - When partition heals, node proves it was alive → false positive counted")
+	fmt.Println("   - Also tracks refutation rate for suspicions that succeed")
 	fmt.Println()
 
 	// Create a context for controlling the failure injection
 	stopFailureInjection := make(chan bool)
 
-	// Inject failures at intervals
+	// Inject network partitions to measure false positives
 	go func() {
-		// Track failure injection times for latency calculation
-		type failureEvent struct {
-			nodeIndex  int
-			nodeID     string
-			failTime   time.Time
-			detectTime time.Time
-		}
-
-		// Need at least 3 nodes to safely kill one (2 remain alive)
+		// Need at least 3 nodes
 		if len(nodes) < 3 {
 			return
 		}
 
-		// Wait a bit for initial stabilization
+		// Wait for initial stabilization
 		time.Sleep(10 * time.Second)
 
-		// Inject a failure every 20 seconds
-		failureInterval := time.NewTicker(20 * time.Second)
-		defer failureInterval.Stop()
+		// Inject network partitions every 15 seconds to generate false positives
+		partitionInterval := time.NewTicker(15 * time.Second)
+		defer partitionInterval.Stop()
 
-		targetNodeIndex := len(nodes) - 1 // Pick last node
+		// Rotate which node gets partitioned to distribute the load
+		targetNodeIndex := 0
 
 		for {
 			select {
 			case <-stopFailureInjection:
 				return
-			case <-failureInterval.C:
-
-				// Store node ID BEFORE crashing (can't access after)
-				failingNodeID := nodes[targetNodeIndex].LocalNode().ID
-
-				// Simulate real CRASH by not sending leave messages
-				// This forces other nodes to detect via probe timeout → Suspect → Failed
-				fmt.Printf("\n🔴 INJECTING FAILURE: Crashing %s\n", failingNodeID)
-				failTime := time.Now()
-
-				// Use Crash() instead of Stop() to skip graceful leave announcement
-				if err := nodes[targetNodeIndex].Crash(); err != nil {
-					log.Printf("Error crashing node: %v", err)
-					continue
-				}
-
-				// Set up detection callback for remaining nodes
-				event := failureEvent{
-					nodeIndex: targetNodeIndex,
-					nodeID:    failingNodeID,
-					failTime:  failTime,
-				}
-
-				// Wait for detection (monitor other nodes)
-				go func(evt failureEvent) {
-					detectionTimeout := time.After(15 * time.Second)
-					checkTicker := time.NewTicker(500 * time.Millisecond)
-					defer checkTicker.Stop()
-
-					for {
-						select {
-						case <-detectionTimeout:
-							fmt.Println("⚠️  Failure detection timeout")
-							return
-						case <-checkTicker.C:
-							// Check if any OTHER node detected the departure
-							for i, node := range nodes {
-								if i == evt.nodeIndex {
-									// Skip the stopped node itself
-									continue
-								}
-								members := node.GetMembers()
-								for _, m := range members {
-									if m.ID == evt.nodeID {
-										// After calling Crash(), nodes detect failure via timeout
-										// They first mark as Suspect, then Failed after suspicion timeout
-										if m.Status == swim.Suspect || m.Status == swim.Failed {
-											detectTime := time.Now()
-											detectionLatency := detectTime.Sub(evt.failTime)
-											fmt.Printf("✓ Failure detected in %.2fs by %s (status: %v)\n",
-												detectionLatency.Seconds(), node.LocalNode().ID, m.Status)
-											metrics.RecordFailureDetection(detectionLatency)
-											// Note: Suspicions are already recorded by SWIM protocol itself
-											// in handleSuspicion() when nodes mark others as Suspect
-											return
-										}
-									}
-								}
-							}
-						}
-					}
-				}(event)
-
-				// Wait 15 seconds to allow detection to complete
-				// (probe interval 1s + suspicion timeout 5s + retries ~8s)
-				time.Sleep(15 * time.Second)
-
-				fmt.Printf("🟢 RECOVERY: Restarting %s\n\n", failingNodeID)
-				rejoinStart := time.Now()
-
-				// Recreate and restart the node
-				nodeID := fmt.Sprintf("node%d", targetNodeIndex+1)
-				bindAddr := fmt.Sprintf("127.0.0.1:%d", 7946+targetNodeIndex)
-
-				config := swim.DefaultConfig()
-				config.NodeID = nodeID
-				config.BindAddr = bindAddr
-				config.AdvertiseAddr = bindAddr
-				config.Logger = &SimpleLogger{nodeID: nodeID, quiet: true}
-				config.JoinNodes = []string{"127.0.0.1:7946"}
-
-				newNode, err := swim.New(config)
-				if err != nil {
-					log.Printf("Failed to recreate node: %v", err)
-					continue
-				}
-				newNode.SetMetrics(metrics)
-
-				if err := newNode.Start(); err != nil {
-					log.Printf("Failed to restart node: %v", err)
-					continue
-				}
-
-				nodes[targetNodeIndex] = newNode
-
-				// Wait for the node to actually rejoin the cluster
-				// Check if other nodes see it as Alive
-				rejoinDetected := false
-				rejoinTimeout := time.After(20 * time.Second)
-				rejoinTicker := time.NewTicker(500 * time.Millisecond)
-				defer rejoinTicker.Stop()
-
-				for !rejoinDetected {
-					select {
-					case <-rejoinTimeout:
-						fmt.Printf("⚠️  Rejoin timeout for %s\n\n", nodeID)
-						rejoinDetected = true
-					case <-rejoinTicker.C:
-						// Check if any other node sees this node as Alive
-						for i, node := range nodes {
-							if i == targetNodeIndex {
-								continue
-							}
-							members := node.GetMembers()
-							for _, m := range members {
-								if m.ID == nodeID && m.Status == swim.Alive {
-									rejoinLatency := time.Since(rejoinStart)
-									metrics.RecordMemberJoin(rejoinLatency)
-									fmt.Printf("✓ Node rejoined in %.2fs\n\n", rejoinLatency.Seconds())
-									rejoinDetected = true
-									break
-								}
-							}
-							if rejoinDetected {
-								break
-							}
-						}
-					}
-				}
-
+			case <-partitionInterval.C:
+				// Rotate through nodes (skip node index 0 as it's often the seed)
+				targetNodeIndex = (targetNodeIndex % (len(nodes) - 1)) + 1
+				injectNetworkPartition(nodes, metrics, groundTruth, targetNodeIndex)
 			}
 		}
 	}()
@@ -424,18 +370,194 @@ func runBenchmarkWithFailures(nodes []*swim.SWIM, durationSeconds int, metrics *
 	for {
 		select {
 		case <-done:
-			close(stopFailureInjection) // Stop failure injection
+			close(stopFailureInjection)
 			return
 		case <-ticker.C:
 			elapsed := time.Since(startTime)
 			report := metrics.GetReport(len(nodes))
-			fmt.Printf("  [%.0fs] Metrics... (Detections: %d, Suspicions: %d, FP Rate: %.1f%%)\n",
+			fmt.Printf("  [%.0fs] Suspicions: %d, Refuted: %d (%.1f%%), False Positives: %d (%.1f%%)\n",
 				elapsed.Seconds(),
-				report.FailureDetectionCount,
 				report.SuspicionCount,
+				report.RefutedSuspicionCount,
+				report.RefutationRate*100,
+				report.FalsePositiveCount,
 				report.FalsePositiveRate*100)
 		}
 	}
+}
+
+// runCrashStopBenchmark measures failure detection with real node crashes
+func runCrashStopBenchmark(nodes []*swim.SWIM, durationSeconds int, metrics *swim.Metrics, groundTruth *GroundTruth) {
+	startTime := time.Now()
+	duration := time.Duration(durationSeconds) * time.Second
+
+	fmt.Printf("Running for %d seconds with CRASH-STOP FAILURES...\n", durationSeconds)
+	fmt.Println("📊 This measures FAILURE DETECTION:")
+	fmt.Println("   - How long to detect crashed nodes?")
+	fmt.Println("   - Suspicion → Failed transition timing")
+	fmt.Println("   - Detection latency and accuracy")
+	fmt.Println("   - Note: Crashed nodes CANNOT refute (not false positives)")
+	fmt.Println()
+
+	// Create a context for controlling the failure injection
+	stopFailureInjection := make(chan bool)
+
+	// Inject crash-stop failures
+	go func() {
+		// Need at least 3 nodes
+		if len(nodes) < 3 {
+			return
+		}
+
+		// Wait for initial stabilization
+		time.Sleep(10 * time.Second)
+
+		// Inject a crash every 30 seconds
+		crashInterval := time.NewTicker(30 * time.Second)
+		defer crashInterval.Stop()
+
+		targetNodeIndex := len(nodes) - 1 // Always crash the last node
+
+		for {
+			select {
+			case <-stopFailureInjection:
+				return
+			case <-crashInterval.C:
+				injectCrashStop(nodes, metrics, groundTruth, targetNodeIndex)
+			}
+		}
+	}()
+
+	// Monitor progress
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	done := make(chan bool)
+	go func() {
+		time.Sleep(duration)
+		done <- true
+	}()
+
+	for {
+		select {
+		case <-done:
+			close(stopFailureInjection)
+			return
+		case <-ticker.C:
+			elapsed := time.Since(startTime)
+			report := metrics.GetReport(len(nodes))
+			fmt.Printf("  [%.0fs] Detections: %d, Suspicions: %d, Avg Detection Latency: %.2fms\n",
+				elapsed.Seconds(),
+				report.FailureDetectionCount,
+				report.SuspicionCount,
+				report.FailureDetectionLatency.Mean)
+		}
+	}
+}
+
+// injectNetworkPartition simulates a prolonged network partition (creates true false positive)
+// Per SWIM paper: partitions exceeding suspicion timeout cause healthy processes to be marked Failed
+func injectNetworkPartition(nodes []*swim.SWIM, metrics *swim.Metrics, groundTruth *GroundTruth, targetNodeIndex int) {
+	if targetNodeIndex >= len(nodes) {
+		return
+	}
+
+	targetNodeID := nodes[targetNodeIndex].LocalNode().ID
+
+	fmt.Printf("\n🟡 NETWORK PARTITION: Isolating %s (will exceed timeout → Failed)\n", targetNodeID)
+
+	// Mark in ground truth: node is still alive (process running), just partitioned
+	groundTruth.MarkPartitioned(targetNodeID)
+	partitionStartTime := time.Now()
+
+	// Block incoming messages AND pause probes
+	// This simulates a node that appears unresponsive but will come back
+	nodes[targetNodeIndex].SimulateNetworkPartition()
+	nodes[targetNodeIndex].PauseProbes()
+
+	// Wait long enough to EXCEED suspicion timeout (5s) so node is marked Failed
+	// Per SWIM paper: This creates a FALSE POSITIVE because the process is still running
+	// When partition heals, the node will prove it was alive (creating measurable false positive)
+	partitionDuration := 10 * time.Second
+	fmt.Printf("   Partition duration: %.0fs (exceeds 5s timeout → will be marked Failed)\n", partitionDuration.Seconds())
+
+	time.Sleep(partitionDuration)
+
+	// End partition - node will prove it's alive, revealing the false positive
+	fmt.Printf("🟢 PARTITION ENDED: %s will now prove it was alive (FALSE POSITIVE)\n", targetNodeID)
+	nodes[targetNodeIndex].EndNetworkPartition()
+	nodes[targetNodeIndex].ResumeProbes()
+
+	// Mark partition ended in ground truth
+	groundTruth.EndPartition(targetNodeID)
+
+	// Give more time for:
+	// 1. Node to rejoin and send Alive messages
+	// 2. Other nodes to receive the Alive update
+	// 3. Metrics to be recorded (false positive detection on Failed→Alive)
+	time.Sleep(5 * time.Second)
+
+	// Measure recovery latency (time from partition end to full recovery)
+	recoveryLatency := time.Since(partitionStartTime.Add(partitionDuration))
+
+	// Check metrics
+	report := metrics.GetReport(len(nodes))
+	fmt.Printf("✓ Recovery complete in %.2fs (Refuted: %d, False Positives: %d)\n\n",
+		recoveryLatency.Seconds(), report.RefutedSuspicionCount, report.FalsePositiveCount)
+}
+
+// injectCrashStop crashes a node permanently (no refutation possible)
+func injectCrashStop(nodes []*swim.SWIM, metrics *swim.Metrics, groundTruth *GroundTruth, targetNodeIndex int) {
+	if targetNodeIndex >= len(nodes) {
+		return
+	}
+
+	failingNodeID := nodes[targetNodeIndex].LocalNode().ID
+
+	fmt.Printf("\n🔴 CRASH-STOP: Crashing %s (permanent failure)\n", failingNodeID)
+	failTime := time.Now()
+
+	// Mark as crashed in ground truth (process actually stopped)
+	groundTruth.MarkCrashed(failingNodeID)
+
+	if err := nodes[targetNodeIndex].Crash(); err != nil {
+		log.Printf("Error crashing node: %v", err)
+		return
+	}
+
+	// Monitor for detection
+	go func(nodeID string, fTime time.Time) {
+		detectionTimeout := time.After(15 * time.Second)
+		checkTicker := time.NewTicker(500 * time.Millisecond)
+		defer checkTicker.Stop()
+
+		for {
+			select {
+			case <-detectionTimeout:
+				fmt.Println("⚠️  Failure detection timeout")
+				return
+			case <-checkTicker.C:
+				for i, node := range nodes {
+					if i == targetNodeIndex {
+						continue
+					}
+					members := node.GetMembers()
+					for _, m := range members {
+						if m.ID == nodeID && (m.Status == swim.Suspect || m.Status == swim.Failed) {
+							detectTime := time.Now()
+							detectionLatency := detectTime.Sub(fTime)
+							fmt.Printf("✓ Failure detected in %.2fs by %s (status: %v)\n",
+								detectionLatency.Seconds(), node.LocalNode().ID, m.Status)
+							metrics.RecordFailureDetection(detectionLatency)
+							return
+						}
+					}
+				}
+			}
+		}
+	}(failingNodeID, failTime)
+
+	fmt.Printf("   Note: Node will NOT rejoin (testing permanent failures)\n\n")
 }
 
 func saveReportJSON(report *swim.Report, filename string) {

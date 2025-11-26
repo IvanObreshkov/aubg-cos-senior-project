@@ -13,8 +13,9 @@ type ProbeScheduler struct {
 	ticker        *time.Ticker
 	stopCh        chan struct{}
 	wg            sync.WaitGroup
-	seqNo         uint64   // Sequence number for tracking probe requests
-	pendingProbes sync.Map // map[uint64]*probeContext
+	seqNo         uint64      // Sequence number for tracking probe requests
+	pendingProbes sync.Map    // map[uint64]*probeContext
+	paused        atomic.Bool // Flag to pause probing for testing
 }
 
 // probeContext tracks the state of an ongoing probe
@@ -68,6 +69,11 @@ func (ps *ProbeScheduler) Stop() {
 // probe executes one round of the SWIM failure detection protocol
 // Section 3: "Mj picks some member Mi at random... sends a ping"
 func (ps *ProbeScheduler) probe() {
+	// Skip if probing is paused (for testing)
+	if ps.paused.Load() {
+		return
+	}
+
 	// Select a random member to probe (excluding self)
 	target := ps.swim.memberList.GetRandomMember(ps.swim.config.NodeID)
 	if target == nil {
@@ -285,4 +291,14 @@ func (ps *ProbeScheduler) HandleIndirectAck(msg *Message) {
 	if exists && member.Status == Suspect {
 		ps.swim.handleAlive(ctx.targetID, msg.Incarnation)
 	}
+}
+
+// Pause temporarily stops sending probes (for testing false positive scenarios)
+func (ps *ProbeScheduler) Pause() {
+	ps.paused.Store(true)
+}
+
+// Resume resumes sending probes after being paused
+func (ps *ProbeScheduler) Resume() {
+	ps.paused.Store(false)
 }

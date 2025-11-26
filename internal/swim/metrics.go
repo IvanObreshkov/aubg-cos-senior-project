@@ -28,16 +28,14 @@ type Metrics struct {
 	ackCount          atomic.Uint64
 	pingReqCount      atomic.Uint64
 	indirectPingCount atomic.Uint64
-	suspectMsgCount   atomic.Uint64
-	aliveMsgCount     atomic.Uint64
-	confirmMsgCount   atomic.Uint64
 	totalMessagesIn   atomic.Uint64
 	totalMessagesOut  atomic.Uint64
 
 	// Protocol events
 	failureDetectionCount atomic.Uint64
-	falsePositiveCount    atomic.Uint64
 	suspicionCount        atomic.Uint64
+	refutedSuspicionCount atomic.Uint64 // Suspicions successfully refuted (Suspect → Alive)
+	falseFailureCount     atomic.Uint64 // True false positives: healthy nodes incorrectly marked Failed
 
 	// Throughput tracking
 	startTime time.Time
@@ -111,24 +109,6 @@ func (m *Metrics) RecordIndirectPing() {
 	m.totalMessagesOut.Add(1)
 }
 
-// RecordSuspectMsg increments the suspect message counter
-func (m *Metrics) RecordSuspectMsg() {
-	m.suspectMsgCount.Add(1)
-	m.totalMessagesOut.Add(1)
-}
-
-// RecordAliveMsg increments the alive message counter
-func (m *Metrics) RecordAliveMsg() {
-	m.aliveMsgCount.Add(1)
-	m.totalMessagesOut.Add(1)
-}
-
-// RecordConfirmMsg increments the confirm message counter
-func (m *Metrics) RecordConfirmMsg() {
-	m.confirmMsgCount.Add(1)
-	m.totalMessagesOut.Add(1)
-}
-
 // RecordMessageIn increments the incoming message counter
 func (m *Metrics) RecordMessageIn() {
 	m.totalMessagesIn.Add(1)
@@ -144,9 +124,16 @@ func (m *Metrics) RecordSuspicion() {
 	m.suspicionCount.Add(1)
 }
 
-// RecordFalsePositive records when a suspected member turns out to be alive
-func (m *Metrics) RecordFalsePositive() {
-	m.falsePositiveCount.Add(1)
+// RecordRefutedSuspicion records when a suspicion is successfully refuted (Suspect → Alive)
+// This is NOT a false positive - it's a success story showing the suspicion mechanism works
+func (m *Metrics) RecordRefutedSuspicion() {
+	m.refutedSuspicionCount.Add(1)
+}
+
+// RecordTrueFalsePositive records when a healthy node (running process) was incorrectly marked Failed
+// Per SWIM paper: This happens when network issues cause a healthy process to be declared dead
+func (m *Metrics) RecordTrueFalsePositive() {
+	m.falseFailureCount.Add(1)
 }
 
 // LatencyStats contains percentile statistics for latencies
@@ -292,15 +279,18 @@ type Report struct {
 	AckCount          uint64 `json:"ack_count"`
 	PingReqCount      uint64 `json:"ping_req_count"`
 	IndirectPingCount uint64 `json:"indirect_ping_count"`
-	SuspectMsgCount   uint64 `json:"suspect_msg_count"`
-	AliveMsgCount     uint64 `json:"alive_msg_count"`
-	ConfirmMsgCount   uint64 `json:"confirm_msg_count"`
 
-	// Protocol metrics
-	FailureDetectionCount uint64  `json:"failure_detection_count"`
-	SuspicionCount        uint64  `json:"suspicion_count"`
-	FalsePositiveCount    uint64  `json:"false_positive_count"`
-	FalsePositiveRate     float64 `json:"false_positive_rate"`
+	// Protocol metrics - Failure Detection
+	FailureDetectionCount uint64 `json:"failure_detection_count"`
+	SuspicionCount        uint64 `json:"suspicion_count"`
+
+	// Safety Metrics (Suspicion Mechanism Effectiveness)
+	RefutedSuspicionCount uint64  `json:"refuted_suspicion_count"`
+	RefutationRate        float64 `json:"refutation_rate"` // Ratio of suspicions that were refuted
+
+	// Accuracy Metrics (True False Positives per SWIM paper)
+	FalsePositiveCount uint64  `json:"false_positive_count"` // Healthy nodes incorrectly marked Failed
+	FalsePositiveRate  float64 `json:"false_positive_rate"`  // Ratio of failures that were false positives
 }
 
 // GetReport generates a comprehensive performance report
@@ -316,10 +306,20 @@ func (m *Metrics) GetReport(clusterSize int) Report {
 	}
 
 	suspicions := m.suspicionCount.Load()
-	falsePositives := m.falsePositiveCount.Load()
-	falsePositiveRate := 0.0
+	refutedSuspicions := m.refutedSuspicionCount.Load()
+	refutationRate := 0.0
 	if suspicions > 0 {
-		falsePositiveRate = float64(falsePositives) / float64(suspicions)
+		refutationRate = float64(refutedSuspicions) / float64(suspicions)
+	}
+
+	failures := m.failureDetectionCount.Load()
+	trueFalsePositives := m.falseFailureCount.Load()
+	falsePositiveRate := 0.0
+	// Calculate false positive rate as: false_positives / total_failures
+	// Total failures = actual failures that stayed Failed + false positives (those that went Failed→Alive)
+	totalFailureEvents := failures + trueFalsePositives
+	if totalFailureEvents > 0 {
+		falsePositiveRate = float64(trueFalsePositives) / float64(totalFailureEvents)
 	}
 
 	return Report{
@@ -339,12 +339,11 @@ func (m *Metrics) GetReport(clusterSize int) Report {
 		AckCount:                 m.ackCount.Load(),
 		PingReqCount:             m.pingReqCount.Load(),
 		IndirectPingCount:        m.indirectPingCount.Load(),
-		SuspectMsgCount:          m.suspectMsgCount.Load(),
-		AliveMsgCount:            m.aliveMsgCount.Load(),
-		ConfirmMsgCount:          m.confirmMsgCount.Load(),
-		FailureDetectionCount:    m.failureDetectionCount.Load(),
-		SuspicionCount:           m.suspicionCount.Load(),
-		FalsePositiveCount:       falsePositives,
+		FailureDetectionCount:    failures,
+		SuspicionCount:           suspicions,
+		RefutedSuspicionCount:    refutedSuspicions,
+		RefutationRate:           refutationRate,
+		FalsePositiveCount:       trueFalsePositives,
 		FalsePositiveRate:        falsePositiveRate,
 	}
 }
@@ -392,18 +391,27 @@ func (r *Report) PrintReport() {
 	fmt.Printf("  Ack: %d\n", r.AckCount)
 	fmt.Printf("  PingReq: %d\n", r.PingReqCount)
 	fmt.Printf("  IndirectPing: %d\n", r.IndirectPingCount)
-	fmt.Printf("  Suspect: %d\n", r.SuspectMsgCount)
-	fmt.Printf("  Alive: %d\n", r.AliveMsgCount)
-	fmt.Printf("  Confirm: %d\n", r.ConfirmMsgCount)
 
 	fmt.Printf("\n----------------------------------------\n")
 	fmt.Printf("Protocol Metrics\n")
 	fmt.Printf("----------------------------------------\n")
+
 	fmt.Printf("\nFailure Detection:\n")
-	fmt.Printf("  Detections: %d\n", r.FailureDetectionCount)
-	fmt.Printf("  Suspicions: %d\n", r.SuspicionCount)
-	fmt.Printf("  False Positives: %d\n", r.FalsePositiveCount)
+	fmt.Printf("  Failures Detected: %d\n", r.FailureDetectionCount)
+	fmt.Printf("  Suspicions Raised: %d\n", r.SuspicionCount)
+
+	fmt.Printf("\nSafety Metrics (Suspicion Mechanism):\n")
+	fmt.Printf("  Refuted Suspicions: %d\n", r.RefutedSuspicionCount)
+	fmt.Printf("  Refutation Rate: %.2f%%\n", r.RefutationRate*100)
+	fmt.Printf("  → These are SUCCESSES: Nodes suspected but proven alive before timeout\n")
+	fmt.Printf("  → High refutation rate = suspicion mechanism prevents premature failures\n")
+
+	fmt.Printf("\nAccuracy Metrics (False Positives per SWIM Paper):\n")
+	fmt.Printf("  True False Positives: %d\n", r.FalsePositiveCount)
 	fmt.Printf("  False Positive Rate: %.2f%%\n", r.FalsePositiveRate*100)
+	fmt.Printf("  → These are FAILURES: Healthy processes incorrectly marked as Failed\n")
+	fmt.Printf("  → Per SWIM: Healthy = process running (not network reachable)\n")
+	fmt.Printf("  → Low false positive rate = accurate failure detection\n")
 
 	fmt.Println("\n========================================")
 }
@@ -451,13 +459,11 @@ func (m *Metrics) Reset() {
 	m.ackCount.Store(0)
 	m.pingReqCount.Store(0)
 	m.indirectPingCount.Store(0)
-	m.suspectMsgCount.Store(0)
-	m.aliveMsgCount.Store(0)
-	m.confirmMsgCount.Store(0)
 	m.totalMessagesIn.Store(0)
 	m.totalMessagesOut.Store(0)
 	m.failureDetectionCount.Store(0)
-	m.falsePositiveCount.Store(0)
+	m.refutedSuspicionCount.Store(0)
+	m.falseFailureCount.Store(0)
 	m.suspicionCount.Store(0)
 	m.startTime = time.Now()
 }
@@ -466,7 +472,6 @@ func (m *Metrics) Reset() {
 func (m *Metrics) GetPingCount() uint64        { return m.pingCount.Load() }
 func (m *Metrics) GetAckCount() uint64         { return m.ackCount.Load() }
 func (m *Metrics) GetPingReqCount() uint64     { return m.pingReqCount.Load() }
-func (m *Metrics) GetSuspectMsgCount() uint64  { return m.suspectMsgCount.Load() }
 func (m *Metrics) GetSuspicionCount() uint64   { return m.suspicionCount.Load() }
 func (m *Metrics) GetFailureCount() uint64     { return m.failureDetectionCount.Load() }
 func (m *Metrics) GetTotalMessagesIn() uint64  { return m.totalMessagesIn.Load() }
