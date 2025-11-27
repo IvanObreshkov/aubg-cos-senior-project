@@ -11,9 +11,15 @@ OUTPUT_DIR="$PROJECT_ROOT/benchmarks/swim"
 
 # Check if comparing failure results
 MODE="${1:-normal}"
-if [ "$MODE" == "failures" ]; then
+if [ "$MODE" == "partitions" ]; then
+    FILE_SUFFIX="_partitions"
+    MODE_NAME="NETWORK PARTITIONS (False Positives)"
+elif [ "$MODE" == "crashstop" ]; then
+    FILE_SUFFIX="_crashstop"
+    MODE_NAME="CRASH-STOP FAILURES (Real Crashes)"
+elif [ "$MODE" == "failures" ]; then
     FILE_SUFFIX="_failures"
-    MODE_NAME="WITH FAILURE INJECTION"
+    MODE_NAME="WITH FAILURE INJECTION (Legacy)"
 else
     FILE_SUFFIX=""
     MODE_NAME="NORMAL OPERATION"
@@ -27,7 +33,11 @@ echo ""
 
 if [ ! -d "$OUTPUT_DIR" ]; then
     echo "Error: No benchmark results found at $OUTPUT_DIR"
-    if [ "$MODE" == "failures" ]; then
+    if [ "$MODE" == "partitions" ]; then
+        echo "Please run ./cmd/swim/benchmark/run_benchmarks_partitions.sh first"
+    elif [ "$MODE" == "crashstop" ]; then
+        echo "Please run ./cmd/swim/benchmark/run_benchmarks_crashstop.sh first"
+    elif [ "$MODE" == "failures" ]; then
         echo "Please run ./cmd/swim/benchmark/run_benchmarks_failures.sh first"
     else
         echo "Please run ./cmd/swim/benchmark/run_benchmarks.sh first"
@@ -93,18 +103,35 @@ for size in 3 5 7 9; do
 done
 
 echo ""
-echo "Failure Detection Stats"
+echo "NFR3 - Reliability Metrics"
 echo "-------------------------------------"
-printf "%-10s | %-15s | %-15s | %-15s\n" "Cluster" "Detections" "Suspicions" "False Positive %"
+echo ""
+echo "Safety Metrics (Suspicion Mechanism Effectiveness)"
+printf "%-10s | %-15s | %-15s | %-15s\n" "Cluster" "Suspicions" "Refuted" "Refutation %"
+printf "%-10s-+-%-15s-+-%-15s-+-%-15s\n" "----------" "---------------" "---------------" "---------------"
+
+for size in 3 5 7 9; do
+    file="$OUTPUT_DIR/benchmark_${size}nodes${FILE_SUFFIX}.json"
+    if [ -f "$file" ]; then
+        suspicions=$(jq -r '.suspicion_count // 0' "$file")
+        refuted=$(jq -r '.refuted_suspicion_count // 0' "$file")
+        refutation_rate=$(jq -r '.refutation_rate * 100 // 0' "$file")
+        printf "%-10s | %-15s | %-15s | %-15.2f\n" "${size} nodes" "$suspicions" "$refuted" "$refutation_rate"
+    fi
+done
+
+echo ""
+echo "Accuracy Metrics (False Positives per SWIM Paper)"
+printf "%-10s | %-15s | %-15s | %-15s\n" "Cluster" "Failures" "False Positive" "FP Rate %"
 printf "%-10s-+-%-15s-+-%-15s-+-%-15s\n" "----------" "---------------" "---------------" "---------------"
 
 for size in 3 5 7 9; do
     file="$OUTPUT_DIR/benchmark_${size}nodes${FILE_SUFFIX}.json"
     if [ -f "$file" ]; then
         detections=$(jq -r '.failure_detection_count // 0' "$file")
-        suspicions=$(jq -r '.suspicion_count // 0' "$file")
+        false_positives=$(jq -r '.false_positive_count // 0' "$file")
         fp_rate=$(jq -r '.false_positive_rate * 100 // 0' "$file")
-        printf "%-10s | %-15s | %-15s | %-15.2f\n" "${size} nodes" "$detections" "$suspicions" "$fp_rate"
+        printf "%-10s | %-15s | %-15s | %-15.2f\n" "${size} nodes" "$detections" "$false_positives" "$fp_rate"
     fi
 done
 
@@ -160,15 +187,11 @@ if [ -f "$file" ]; then
     ack=$(jq -r '.ack_count // 0' "$file")
     ping_req=$(jq -r '.ping_req_count // 0' "$file")
     indirect=$(jq -r '.indirect_ping_count // 0' "$file")
-    suspect=$(jq -r '.suspect_msg_count // 0' "$file")
-    alive=$(jq -r '.alive_msg_count // 0' "$file")
 
     echo "  Ping:         $ping"
     echo "  Ack:          $ack"
     echo "  PingReq:      $ping_req"
     echo "  IndirectPing: $indirect"
-    echo "  Suspect:      $suspect"
-    echo "  Alive:        $alive"
 fi
 
 echo ""
@@ -187,9 +210,16 @@ echo "To compare different modes:"
 if [ "$MODE" == "failures" ]; then
     echo "  Normal operation:  ./cmd/swim/benchmark/compare_benchmarks.sh"
     echo "  Failures (current): ./cmd/swim/benchmark/compare_benchmarks.sh failures"
+elif [ "$MODE" == "partitions" ]; then
+    echo "  Normal operation:  ./cmd/swim/benchmark/compare_benchmarks.sh"
+    echo "  Partitions (current): ./cmd/swim/benchmark/compare_benchmarks.sh partitions"
+elif [ "$MODE" == "crashstop" ]; then
+    echo "  Normal operation:  ./cmd/swim/benchmark/compare_benchmarks.sh"
+    echo "  Crash-Stop (current): ./cmd/swim/benchmark/compare_benchmarks.sh crashstop"
 else
     echo "  Normal operation (current): ./cmd/swim/benchmark/compare_benchmarks.sh"
     echo "  Failures:          ./cmd/swim/benchmark/compare_benchmarks.sh failures"
+    echo "  Partitions:        ./cmd/swim/benchmark/compare_benchmarks.sh partitions"
+    echo "  Crash-Stop:        ./cmd/swim/benchmark/compare_benchmarks.sh crashstop"
 fi
 echo "========================================="
-

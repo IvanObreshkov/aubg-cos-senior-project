@@ -325,6 +325,15 @@ func runPartitionBenchmark(nodes []*swim.SWIM, durationSeconds int, metrics *swi
 	fmt.Println("   - Also tracks refutation rate for suspicions that succeed")
 	fmt.Println()
 
+	// Set up failure detection callbacks for all nodes
+	// This tracks when nodes are marked Failed (for denominator of false positive rate)
+	for _, node := range nodes {
+		node.OnMemberFailed(func(member *swim.Member) {
+			// Record the failure detection (without latency timing, since we're measuring false positives not speed)
+			metrics.RecordFailureDetection(0)
+		})
+	}
+
 	// Create a context for controlling the failure injection
 	stopFailureInjection := make(chan bool)
 
@@ -513,6 +522,12 @@ func injectCrashStop(nodes []*swim.SWIM, metrics *swim.Metrics, groundTruth *Gro
 	}
 
 	failingNodeID := nodes[targetNodeIndex].LocalNode().ID
+
+	// Check if node is already crashed in ground truth
+	if !groundTruth.IsActuallyAlive(failingNodeID) {
+		fmt.Printf("\n⚠️  Node %s is already crashed, skipping\n", failingNodeID)
+		return
+	}
 
 	fmt.Printf("\n🔴 CRASH-STOP: Crashing %s (permanent failure)\n", failingNodeID)
 	failTime := time.Now()

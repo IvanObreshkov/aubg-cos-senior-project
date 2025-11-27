@@ -747,10 +747,10 @@ func (s *SWIM) handleFailure(member *Member) {
 	// Update status
 	s.memberList.UpdateMemberStatus(member.ID, Failed, member.Incarnation)
 
-	// Record failure detection (without latency, since we don't track failure time)
-	if s.metrics != nil {
-		s.metrics.RecordFailureDetection(0) // 0 latency since we're not tracking timing here
-	}
+	// Note: We don't call RecordFailureDetection() here because:
+	// 1. In benchmarks, the detection timing is tracked externally with proper latency measurements
+	// 2. In production, this would need a separate mechanism to track actual failure time vs detection time
+	// The benchmark code handles recording failures with accurate timing
 
 	// Notify callback
 	if s.onMemberFailed != nil {
