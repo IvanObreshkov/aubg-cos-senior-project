@@ -1,2 +1,2 @@
 # aubg-cos-senior-project
-Comparing Raft vs Viewstamped Replication (VR).
+Implementation of Raft, SWIM and a Fixed Sequencer Total Order Broadcast.
