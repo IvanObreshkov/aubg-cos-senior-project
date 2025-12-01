@@ -1105,6 +1105,9 @@ func (s *Server) SubmitCommand(command []byte) error {
 
 	// Replicate to followers immediately (don't wait for heartbeat interval)
 	// This ensures faster replication of client commands
+	// This is done as per Section 5.3:
+	// "The leader appends the command to its log as a new entry, then issues AppendEntries RPCs in parallel to each of
+	// the other servers to replicate the entry"
 	go s.ReplicateToFollowers()
 
 	return nil

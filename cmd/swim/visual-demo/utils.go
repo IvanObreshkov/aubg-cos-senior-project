@@ -96,7 +96,7 @@ func getNodeInfo(node *swim.SWIM, nodeName string, config *swim.Config) NodeInfo
 			ProbesReceived:   metrics.GetTotalMessagesIn(), // Approximation
 			AcksSent:         metrics.GetAckCount(),
 			AcksReceived:     metrics.GetAckCount(), // Approximation
-			SuspectsRaised:   metrics.GetSuspectMsgCount(),
+			SuspectsRaised:   metrics.GetSuspicionCount(),
 			FailuresDetected: metrics.GetFailureCount(),
 		}
 	} else {
