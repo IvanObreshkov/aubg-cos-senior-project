@@ -636,11 +636,8 @@ func (s *Server) ClientCommand(ctx context.Context, req *proto.ClientCommandRequ
 
 	s.mu.Unlock()
 
-	// Replicate to followers immediately
 	go s.replicateToFollowers()
 
-	// For simplicity in this demo, we return success immediately
-	// In a production system, you'd wait for the entry to be committed before returning
 	return &proto.ClientCommandResponse{
 		Success:  true,
 		Index:    nextIndex,

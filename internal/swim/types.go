@@ -148,7 +148,7 @@ type Config struct {
 	// ProbeInterval is how often to select a random member to probe
 	ProbeInterval time.Duration
 
-	// IndirectProbeCount is the number of nodes to ask for indirect probes (Section 3: "k members")
+	// IndirectProbeCount is the number of nodes to ask for indirect probes (Section 3.1)
 	// Paper suggests k members for indirect probing
 	IndirectProbeCount int
 
