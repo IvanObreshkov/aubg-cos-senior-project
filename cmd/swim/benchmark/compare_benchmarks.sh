@@ -64,20 +64,22 @@ fi
 
 echo "NFR1 - Performance Metrics (Latency)"
 echo "-------------------------------------"
-printf "%-10s | %-12s | %-12s | %-12s\n" "Cluster" "P50 (ms)" "P95 (ms)" "Mean (ms)"
-printf "%-10s-+-%-12s-+-%-12s-+-%-12s\n" "----------" "------------" "------------" "------------"
+printf "%-10s | %-12s | %-12s | %-12s | %-12s\n" "Cluster" "P50 (ms)" "P95 (ms)" "P99 (ms)" "Mean (ms)"
+printf "%-10s-+-%-12s-+-%-12s-+-%-12s-+-%-12s\n" "----------" "------------" "------------" "------------" "------------"
 
 for size in 3 5 7 9; do
     file="$OUTPUT_DIR/benchmark_${size}nodes${FILE_SUFFIX}.json"
     if [ -f "$file" ]; then
         p50=$(jq -r '.probe_latency.p50_ms // "N/A"' "$file")
         p95=$(jq -r '.probe_latency.p95_ms // "N/A"' "$file")
+        p99=$(jq -r '.probe_latency.p99_ms // "N/A"' "$file")
         mean=$(jq -r '.probe_latency.mean_ms // "N/A"' "$file")
         # Format to 3 decimal places if numeric
         if [ "$p50" != "N/A" ]; then p50=$(printf "%.3f" "$p50"); fi
         if [ "$p95" != "N/A" ]; then p95=$(printf "%.3f" "$p95"); fi
+        if [ "$p99" != "N/A" ]; then p99=$(printf "%.3f" "$p99"); fi
         if [ "$mean" != "N/A" ]; then mean=$(printf "%.3f" "$mean"); fi
-        printf "%-10s | %-12s | %-12s | %-12s\n" "${size} nodes" "$p50" "$p95" "$mean"
+        printf "%-10s | %-12s | %-12s | %-12s | %-12s\n" "${size} nodes" "$p50" "$p95" "$p99" "$mean"
     fi
 done
 
@@ -135,45 +137,49 @@ for size in 3 5 7 9; do
     fi
 done
 
-# Show failure detection latency if in failure mode
-if [ "$MODE" == "failures" ]; then
+# Show failure detection latency if in failure or crashstop mode
+if [ "$MODE" == "failures" ] || [ "$MODE" == "crashstop" ]; then
     echo ""
     echo "Failure Detection Latency"
     echo "-------------------------------------"
-    printf "%-10s | %-12s | %-12s | %-12s\n" "Cluster" "P50 (ms)" "P95 (ms)" "Mean (ms)"
-    printf "%-10s-+-%-12s-+-%-12s-+-%-12s\n" "----------" "------------" "------------" "------------"
+    printf "%-10s | %-12s | %-12s | %-12s | %-12s\n" "Cluster" "P50 (ms)" "P95 (ms)" "P99 (ms)" "Mean (ms)"
+    printf "%-10s-+-%-12s-+-%-12s-+-%-12s-+-%-12s\n" "----------" "------------" "------------" "------------" "------------"
 
     for size in 3 5 7 9; do
         file="$OUTPUT_DIR/benchmark_${size}nodes${FILE_SUFFIX}.json"
         if [ -f "$file" ]; then
             p50=$(jq -r '.failure_detection_latency.p50_ms // "N/A"' "$file")
             p95=$(jq -r '.failure_detection_latency.p95_ms // "N/A"' "$file")
+            p99=$(jq -r '.failure_detection_latency.p99_ms // "N/A"' "$file")
             mean=$(jq -r '.failure_detection_latency.mean_ms // "N/A"' "$file")
             # Format to 3 decimal places if numeric and not zero
             if [ "$p50" != "N/A" ] && [ "$p50" != "0" ]; then p50=$(printf "%.3f" "$p50"); fi
             if [ "$p95" != "N/A" ] && [ "$p95" != "0" ]; then p95=$(printf "%.3f" "$p95"); fi
+            if [ "$p99" != "N/A" ] && [ "$p99" != "0" ]; then p99=$(printf "%.3f" "$p99"); fi
             if [ "$mean" != "N/A" ] && [ "$mean" != "0" ]; then mean=$(printf "%.3f" "$mean"); fi
-            printf "%-10s | %-12s | %-12s | %-12s\n" "${size} nodes" "$p50" "$p95" "$mean"
+            printf "%-10s | %-12s | %-12s | %-12s | %-12s\n" "${size} nodes" "$p50" "$p95" "$p99" "$mean"
         fi
     done
 
     echo ""
     echo "Member Join Latency (Recovery)"
     echo "-------------------------------------"
-    printf "%-10s | %-12s | %-12s | %-12s\n" "Cluster" "P50 (ms)" "P95 (ms)" "Mean (ms)"
-    printf "%-10s-+-%-12s-+-%-12s-+-%-12s\n" "----------" "------------" "------------" "------------"
+    printf "%-10s | %-12s | %-12s | %-12s | %-12s\n" "Cluster" "P50 (ms)" "P95 (ms)" "P99 (ms)" "Mean (ms)"
+    printf "%-10s-+-%-12s-+-%-12s-+-%-12s-+-%-12s\n" "----------" "------------" "------------" "------------" "------------"
 
     for size in 3 5 7 9; do
         file="$OUTPUT_DIR/benchmark_${size}nodes${FILE_SUFFIX}.json"
         if [ -f "$file" ]; then
             p50=$(jq -r '.member_join_latency.p50_ms // "N/A"' "$file")
             p95=$(jq -r '.member_join_latency.p95_ms // "N/A"' "$file")
+            p99=$(jq -r '.member_join_latency.p99_ms // "N/A"' "$file")
             mean=$(jq -r '.member_join_latency.mean_ms // "N/A"' "$file")
             # Format to 3 decimal places if numeric and not zero
             if [ "$p50" != "N/A" ] && [ "$p50" != "0" ]; then p50=$(printf "%.3f" "$p50"); fi
             if [ "$p95" != "N/A" ] && [ "$p95" != "0" ]; then p95=$(printf "%.3f" "$p95"); fi
+            if [ "$p99" != "N/A" ] && [ "$p99" != "0" ]; then p99=$(printf "%.3f" "$p99"); fi
             if [ "$mean" != "N/A" ] && [ "$mean" != "0" ]; then mean=$(printf "%.3f" "$mean"); fi
-            printf "%-10s | %-12s | %-12s | %-12s\n" "${size} nodes" "$p50" "$p95" "$mean"
+            printf "%-10s | %-12s | %-12s | %-12s | %-12s\n" "${size} nodes" "$p50" "$p95" "$p99" "$mean"
         fi
     done
 fi
