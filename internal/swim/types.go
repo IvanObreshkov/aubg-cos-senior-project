@@ -6,7 +6,6 @@ import (
 )
 
 // MemberStatus represents the state of a member in the SWIM protocol
-// Section 4.1: "Each member maintains a membership list"
 type MemberStatus int
 
 const (
@@ -113,7 +112,7 @@ type Message struct {
 	TargetAddr  string   // Target member address
 	SeqNo       uint64   // Sequence number for tracking requests
 	Incarnation uint64   // Incarnation number (for alive/suspect messages)
-	Piggyback   []Update // Piggybacked membership updates (Section 4.4: "infection-style dissemination")
+	Piggyback   []Update // Piggybacked membership updates
 }
 
 // Update represents a membership state update
@@ -137,43 +136,37 @@ type Config struct {
 	// NodeID is the unique identifier for this node
 	NodeID string
 
-	// ProtocolPeriod is the period of the protocol (Section 3: "T protocol period")
+	// ProtocolPeriod is the period of the protocol
 	// Default: 1 second
 	ProtocolPeriod time.Duration
 
-	// ProbeTimeout is the timeout for direct probe (Section 3: "timeout period")
+	// ProbeTimeout is the timeout for direct probe
 	// Should be less than ProtocolPeriod
 	ProbeTimeout time.Duration
 
 	// ProbeInterval is how often to select a random member to probe
 	ProbeInterval time.Duration
 
-	// IndirectProbeCount is the number of nodes to ask for indirect probes (Section 3.1)
+	// IndirectProbeCount is the number of nodes to ask for indirect probes
 	// Paper suggests k members for indirect probing
 	IndirectProbeCount int
 
 	// SuspicionTimeout is how long to wait before marking suspect as failed
-	// Section 4.2: "provides a more graduated notion of failure"
 	SuspicionTimeout time.Duration
 
 	// SuspicionMultiplier adjusts suspicion timeout based on cluster size
-	// Section 4.2: "timeout should be chosen to be at least log(n)"
 	SuspicionMultiplier int
 
 	// MaxGossipPacketSize is the maximum size for piggybacked updates
-	// Section 5: "fixed size: 1 Mbyte in our implementation"
 	MaxGossipPacketSize int
 
 	// NumGossipRetransmissions is the number of times to retransmit an update
-	// Section 5: "a fixed number of times (ξ=2 in the current implementation)"
 	NumGossipRetransmissions int
 
 	// GossipFanout is the number of members to send each gossip to
-	// Section 4.4: influences infection-style dissemination speed
 	GossipFanout int
 
 	// EnableSuspicionMechanism toggles the suspicion mechanism
-	// Section 4.2: "allows us to achieve low false positive rate"
 	EnableSuspicionMechanism bool
 
 	// JoinNodes are the seed nodes to contact when joining

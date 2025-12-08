@@ -7,7 +7,6 @@ import (
 )
 
 // MemberList manages the membership list
-// Section 4: "Each member maintains a membership list, where each entry... contains the address... and a state"
 type MemberList struct {
 	mu      sync.RWMutex
 	members map[string]*Member // Key is member ID
@@ -50,7 +49,6 @@ func (ml *MemberList) AddMember(id, addr string, status MemberStatus, incarnatio
 
 	oldStatus := existing.Status
 
-	// Section 4.3: "incarnation number is a sequence counter... used in refuting false suspicions"
 	// Only update if incarnation is higher, or same incarnation with status priority
 	if incarnation > existing.Incarnation {
 		existing.Incarnation = incarnation
@@ -71,7 +69,6 @@ func (ml *MemberList) AddMember(id, addr string, status MemberStatus, incarnatio
 }
 
 // shouldOverride determines if newStatus should override oldStatus
-// Section 4.3: state priority for same incarnation
 func shouldOverride(oldStatus, newStatus MemberStatus) bool {
 	// If statuses are same, no override
 	if oldStatus == newStatus {
@@ -184,7 +181,6 @@ func (ml *MemberList) GetAliveMembers() []*Member {
 }
 
 // GetRandomMember returns a random member (excluding local and optionally failed/left)
-// Section 3: "each member picks some member at random and sends a ping"
 func (ml *MemberList) GetRandomMember(excludeIDs ...string) *Member {
 	ml.mu.RLock()
 	defer ml.mu.RUnlock()
@@ -211,7 +207,6 @@ func (ml *MemberList) GetRandomMember(excludeIDs ...string) *Member {
 }
 
 // GetRandomMembers returns n random members (excluding specified IDs)
-// Section 3: "selects k members at random and sends... a ping-req"
 func (ml *MemberList) GetRandomMembers(count int, excludeIDs ...string) []*Member {
 	ml.mu.RLock()
 	defer ml.mu.RUnlock()
@@ -274,7 +269,6 @@ func (ml *MemberList) LocalMember() *Member {
 }
 
 // IncrementIncarnation increments the local member's incarnation number
-// Section 4.3: "member voluntarily increases its own incarnation number"
 func (ml *MemberList) IncrementIncarnation() uint64 {
 	ml.mu.Lock()
 	defer ml.mu.Unlock()

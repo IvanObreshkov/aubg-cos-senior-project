@@ -6,13 +6,11 @@ import (
 )
 
 // GossipManager handles infection-style dissemination of membership updates
-// Section 4.4: "Updates are sent via piggybacking on ping and ack messages"
-// Section 5: "infection-style dissemination component... multicast this information"
 type GossipManager struct {
 	mu                 sync.RWMutex
 	updates            []gossipUpdate
-	maxRetransmissions int // ξ in the paper (Section 5: "ξ=2 in current implementation")
-	maxPacketSize      int // Maximum size of piggybacked updates
+	maxRetransmissions int
+	maxPacketSize      int
 }
 
 // gossipUpdate tracks a membership update and how many times it's been transmitted
@@ -32,7 +30,6 @@ func NewGossipManager(maxRetransmissions, maxPacketSize int) *GossipManager {
 }
 
 // AddUpdate adds a new membership update to be gossiped
-// Section 5: "when a membership update is received at member Mi, it is queued for piggybacking"
 func (gm *GossipManager) AddUpdate(update Update) {
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
@@ -63,7 +60,6 @@ func (gm *GossipManager) AddUpdate(update Update) {
 }
 
 // GetUpdatesToGossip returns updates to piggyback on a message
-// Section 5: "piggyback up to the MTU (maximum transmission unit) worth of recent updates"
 func (gm *GossipManager) GetUpdatesToGossip(maxUpdates int) []Update {
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
@@ -92,7 +88,6 @@ func (gm *GossipManager) GetUpdatesToGossip(maxUpdates int) []Update {
 	}
 
 	// Remove updates that have been transmitted enough times
-	// Section 5: "piggybacked on ping or ack messages for ξ protocol periods"
 	gm.cleanupTransmittedUpdates()
 
 	return result
@@ -118,7 +113,6 @@ func (gm *GossipManager) ProcessIncomingUpdates(updates []Update, memberList *Me
 
 		if changed {
 			// If this is new information, queue it for further gossip
-			// Section 5: "infection-style dissemination ensures that membership updates are reliably propagated"
 			gm.AddUpdate(update)
 
 			// Notify about the update with old status
