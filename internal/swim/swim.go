@@ -8,7 +8,6 @@ import (
 )
 
 // SWIM implements the SWIM protocol for cluster membership and failure detection
-// Section 1: "SWIM... is a generic software module... for peer-to-peer group membership"
 type SWIM struct {
 	config     *Config
 	memberList *MemberList
@@ -129,7 +128,6 @@ func (s *SWIM) Stop() error {
 	s.config.Logger.Infof("[SWIM] Stopping SWIM node %s", s.config.NodeID)
 
 	// Announce voluntary leave
-	// Section 4.1: "voluntary leave notification"
 	s.announceLeave()
 
 	// Stop components
@@ -279,7 +277,6 @@ func (s *SWIM) handleMessage(msg *Message) {
 	}
 
 	// Process piggybacked updates first
-	// Section 4.4: "Updates are sent via piggybacking"
 	if len(msg.Piggyback) > 0 {
 		s.gossip.ProcessIncomingUpdates(msg.Piggyback, s.memberList, func(update Update, oldStatus MemberStatus) {
 			s.handleMembershipUpdate(update, oldStatus)
@@ -316,7 +313,6 @@ func (s *SWIM) handleMessage(msg *Message) {
 }
 
 // handlePing handles an incoming ping message
-// Section 3: "Mi responds with an ack"
 func (s *SWIM) handlePing(msg *Message) {
 	s.config.Logger.Debugf("[SWIM] Received ping from %s (seq=%d)", msg.From, msg.SeqNo)
 
@@ -343,7 +339,6 @@ func (s *SWIM) handlePing(msg *Message) {
 }
 
 // handlePingReq handles an incoming ping-req message
-// Section 3: "Mk sends an indirect ping to Mi... and forwards the ack from Mi, if received"
 func (s *SWIM) handlePingReq(msg *Message) {
 	s.config.Logger.Debugf("[SWIM] Received ping-req from %s for target %s (seq=%d)",
 		msg.From, msg.Target, msg.SeqNo)
@@ -420,7 +415,6 @@ func (s *SWIM) handleSuspectMsg(msg *Message) {
 }
 
 // handleAliveMsg handles an alive announcement
-// Section 4.3: "member voluntarily refutes... by multicasting an Alive message"
 func (s *SWIM) handleAliveMsg(msg *Message) {
 	s.config.Logger.Debugf("[SWIM] Received alive message for %s", msg.From)
 
@@ -539,7 +533,6 @@ func (s *SWIM) handleMembershipUpdate(update Update, oldStatus MemberStatus) {
 	if update.MemberID == s.config.NodeID {
 		switch update.Status {
 		case Suspect:
-			// Section 4.3: "member voluntarily refutes... by multicasting an Alive message"
 			s.config.Logger.Infof("[SWIM] Learned via gossip that I'm suspected - refuting")
 			s.refuteSuspicion()
 		case Failed:
@@ -615,7 +608,6 @@ func (s *SWIM) handleMembershipUpdate(update Update, oldStatus MemberStatus) {
 }
 
 // handleSuspicion handles suspicion of a member
-// Section 4.2: "if member Mj suspects Mi... disseminates this suspicion"
 func (s *SWIM) handleSuspicion(member *Member) {
 	if member == nil {
 		return
@@ -644,7 +636,6 @@ func (s *SWIM) handleSuspicion(member *Member) {
 	s.cancelSuspectTimer(member.ID)
 
 	// Calculate suspicion timeout
-	// Section 4.2: "timeout should be chosen to be at least log(n)"
 	clusterSize := s.memberList.NumMembers()
 	suspicionTimeout := s.calculateSuspicionTimeout(clusterSize)
 
@@ -667,7 +658,6 @@ func (s *SWIM) handleSuspicion(member *Member) {
 }
 
 // calculateSuspicionTimeout calculates suspicion timeout based on cluster size
-// Section 4.2: "subgroup membership protocol period... is chosen as a small multiple of log(n)"
 func (s *SWIM) calculateSuspicionTimeout(clusterSize int) time.Duration {
 	if clusterSize < 2 {
 		return s.config.SuspicionTimeout
@@ -699,7 +689,6 @@ func (s *SWIM) handleSuspicionTimeout(memberID string) {
 }
 
 // handleAlive handles an alive announcement (usually a refutation)
-// Section 4.3: "refutes a suspicion... via disseminating an Alive message"
 func (s *SWIM) handleAlive(memberID string, incarnation uint64) {
 	member := s.getMember(memberID)
 	if member == nil {

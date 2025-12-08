@@ -35,7 +35,6 @@ func (s MemberStatus) String() string {
 }
 
 // Member represents a single node in the SWIM cluster
-// Section 4: "Member maintains a membership list, where each entry contains... address and a state"
 type Member struct {
 	ID           string       // Unique identifier for the member
 	Address      string       // Network address (host:port)

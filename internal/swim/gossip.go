@@ -105,7 +105,6 @@ func (gm *GossipManager) cleanupTransmittedUpdates() {
 }
 
 // ProcessIncomingUpdates processes updates from piggybacked gossip
-// Section 4.4: "disseminate membership updates... piggybacking on ping and ack messages"
 func (gm *GossipManager) ProcessIncomingUpdates(updates []Update, memberList *MemberList, onUpdate func(Update, MemberStatus)) {
 	for _, update := range updates {
 		// Try to apply the update to our membership list, getting the old status

@@ -7,7 +7,6 @@ import (
 )
 
 // ProbeScheduler manages the failure detection protocol
-// Section 3: "each member periodically picks some member at random and executes the SWIM failure detector protocol"
 type ProbeScheduler struct {
 	swim          *SWIM
 	ticker        *time.Ticker
@@ -39,7 +38,6 @@ func NewProbeScheduler(swim *SWIM) *ProbeScheduler {
 }
 
 // Start begins the periodic probing
-// Section 3: "each member picks some member at random and sends a ping"
 func (ps *ProbeScheduler) Start() {
 	ps.ticker = time.NewTicker(ps.swim.config.ProbeInterval)
 	ps.wg.Add(1)
@@ -67,7 +65,6 @@ func (ps *ProbeScheduler) Stop() {
 }
 
 // probe executes one round of the SWIM failure detection protocol
-// Section 3: "Mj picks some member Mi at random... sends a ping"
 func (ps *ProbeScheduler) probe() {
 	// Skip if probing is paused (for testing)
 	if ps.paused.Load() {
@@ -99,7 +96,6 @@ func (ps *ProbeScheduler) probe() {
 	ps.sendPing(target, seqNo)
 
 	// Set timeout for direct probe
-	// Section 3: "if Mj does not receive an ack within a timeout period..."
 	ctx.timer = time.AfterFunc(ps.swim.config.ProbeTimeout, func() {
 		ps.handleProbeTimeout(ctx)
 	})
@@ -126,7 +122,6 @@ func (ps *ProbeScheduler) sendPing(target *Member, seqNo uint64) {
 }
 
 // handleProbeTimeout handles timeout of a direct probe
-// Section 3: "Mj indirectly probes Mi by selecting k members at random and sending them a ping-req(Mi)"
 func (ps *ProbeScheduler) handleProbeTimeout(ctx *probeContext) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
@@ -138,7 +133,6 @@ func (ps *ProbeScheduler) handleProbeTimeout(ctx *probeContext) {
 	ps.swim.config.Logger.Debugf("[SWIM] Direct probe timeout for %s, starting indirect probe", ctx.targetID)
 
 	// Select k random members for indirect probing
-	// Section 3: "selects k members at random"
 	indirectNodes := ps.swim.memberList.GetRandomMembers(
 		ps.swim.config.IndirectProbeCount,
 		ps.swim.config.NodeID,
@@ -159,7 +153,6 @@ func (ps *ProbeScheduler) handleProbeTimeout(ctx *probeContext) {
 	}
 
 	// Set timeout for indirect probe
-	// Section 3: "waits for a period less than or equal to the timeout used for direct pings"
 	indirectTimeout := ps.swim.config.ProbeTimeout
 	time.AfterFunc(indirectTimeout, func() {
 		ps.handleIndirectProbeTimeout(ctx)
@@ -186,7 +179,6 @@ func (ps *ProbeScheduler) sendPingReq(node *Member, ctx *probeContext) {
 }
 
 // handleIndirectProbeTimeout handles timeout of indirect probe
-// Section 4.2: "declares Mi as suspected"
 func (ps *ProbeScheduler) handleIndirectProbeTimeout(ctx *probeContext) {
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
@@ -199,7 +191,6 @@ func (ps *ProbeScheduler) handleIndirectProbeTimeout(ctx *probeContext) {
 }
 
 // handleProbeFailed handles a failed probe (both direct and indirect failed)
-// Section 4.2: "if no ack messages are received from Mi within the time-out period... suspects Mi"
 func (ps *ProbeScheduler) handleProbeFailed(ctx *probeContext) {
 	ps.pendingProbes.Delete(ctx.seqNo)
 
@@ -213,7 +204,6 @@ func (ps *ProbeScheduler) handleProbeFailed(ctx *probeContext) {
 		// This prevents recording multiple suspicions for the same failure
 		if member.Status == Alive {
 			// Mark as suspect instead of immediately failed
-			// Section 4.2: "Suspicion mechanism... allows us to achieve low false positive rate"
 			ps.swim.config.Logger.Infof("[SWIM] Marking member %s as SUSPECT (from probe failure)", ctx.targetID)
 			ps.swim.handleSuspicion(member)
 		} else {
@@ -228,7 +218,6 @@ func (ps *ProbeScheduler) handleProbeFailed(ctx *probeContext) {
 }
 
 // HandleAck handles an ACK message received in response to a probe
-// Section 3: "Mi sends back an ack to Mj"
 func (ps *ProbeScheduler) HandleAck(msg *Message) {
 	val, ok := ps.pendingProbes.Load(msg.SeqNo)
 	if !ok {
