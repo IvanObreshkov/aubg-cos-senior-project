@@ -243,6 +243,13 @@ func (s *Server) stepDownToFollower(newTerm uint64, reason string) {
 
 	// If we were a leader, stop heartbeats (must be done outside the lock)
 	if wasLeader {
+		// Cancel all pending client commands - they cannot be completed since we're no longer leader
+		for idx, ch := range s.pendingCommits {
+			ch <- false
+			close(ch)
+			delete(s.pendingCommits, idx)
+		}
+
 		// Unlock, stop heartbeats, then relock
 		s.mu.Unlock()
 		s.StopHeartbeats()
@@ -634,15 +641,49 @@ func (s *Server) ClientCommand(ctx context.Context, req *proto.ClientCommandRequ
 	log.Printf("[SERVER-%s] [TERM-%d] [CLIENT] Appended command to log at index %d: %s",
 		s.ID, currentTerm, nextIndex, string(req.Command))
 
+	// Create a channel to wait for this entry to be committed
+	commitCh := make(chan bool, 1)
+	s.pendingCommits[nextIndex] = commitCh
+
 	s.mu.Unlock()
 
+	// Trigger replication to followers
 	go s.replicateToFollowers()
 
-	return &proto.ClientCommandResponse{
-		Success:  true,
-		Index:    nextIndex,
-		LeaderId: string(s.ID),
-	}, nil
+	// Wait for the entry to be committed (with timeout from context)
+	select {
+	case success := <-commitCh:
+		if success {
+			// Entry was committed successfully
+			log.Printf("[SERVER-%s] [TERM-%d] [CLIENT] Command at index %d committed successfully",
+				s.ID, currentTerm, nextIndex)
+			return &proto.ClientCommandResponse{
+				Success:  true,
+				Index:    nextIndex,
+				LeaderId: string(s.ID),
+			}, nil
+		}
+		// Entry failed to commit (leader stepped down)
+		log.Printf("[SERVER-%s] [TERM-%d] [CLIENT] Command at index %d failed - leader stepped down",
+			s.ID, currentTerm, nextIndex)
+		return &proto.ClientCommandResponse{
+			Success:  false,
+			Index:    nextIndex,
+			LeaderId: "",
+		}, fmt.Errorf("leader stepped down before command could be committed")
+	case <-ctx.Done():
+		// Context cancelled or timed out
+		s.mu.Lock()
+		delete(s.pendingCommits, nextIndex)
+		s.mu.Unlock()
+		log.Printf("[SERVER-%s] [TERM-%d] [CLIENT] Command at index %d timed out waiting for commit",
+			s.ID, currentTerm, nextIndex)
+		return &proto.ClientCommandResponse{
+			Success:  false,
+			Index:    nextIndex,
+			LeaderId: string(s.ID),
+		}, fmt.Errorf("timeout waiting for command to be committed")
+	}
 }
 
 // GetServerState handles requests to query the current state of the server
@@ -1324,6 +1365,15 @@ func (s *Server) updateCommitIndex() {
 					s.ID, s.currentTerm, oldCommitIndex+1, n)
 			}
 
+			// Notify any pending client commands that their entries have been committed
+			for idx := oldCommitIndex + 1; idx <= n; idx++ {
+				if ch, ok := s.pendingCommits[idx]; ok {
+					ch <- true
+					close(ch)
+					delete(s.pendingCommits, idx)
+				}
+			}
+
 			// IMPORTANT: Release the lock before sending heartbeats to avoid blocking
 			// We need to release the lock because SendHeartbeats() will try to acquire a read lock
 			s.mu.Unlock()
@@ -1745,6 +1795,7 @@ func NewServer(currentTerm uint64, addr ServerAddress, peers []ServerID, pubSub 
 			currentTerm:     term,
 			votedFor:        votedFor,
 			electionTimeout: electionTimeout,
+			pendingCommits:  make(map[uint64]chan bool),
 		},
 		ID:           serverID,
 		Address:      addr,

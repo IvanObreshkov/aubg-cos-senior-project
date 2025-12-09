@@ -86,6 +86,10 @@ type serverState struct {
 
 	// electionStartTime tracks when the current election started (for metrics)
 	electionStartTime time.Time
+
+	// pendingCommits tracks client commands waiting for their log entries to be committed
+	// Key is the log index, value is a channel that will receive true on commit success, false on failure
+	pendingCommits map[uint64]chan bool
 }
 
 func (s *serverState) getState() State {
